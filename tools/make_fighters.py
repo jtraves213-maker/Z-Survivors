@@ -10,7 +10,7 @@ Run:  python tools/make_fighters.py   (needs Pillow)
 """
 import colorsys, json, os
 from collections import Counter
-from PIL import Image
+from PIL import Image, ImageOps
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC = os.path.join(ROOT, "src_art")
@@ -236,9 +236,8 @@ def build():
         strip(idle, move, cell).save(os.path.join(OUT, name + ".png"))
         made.append(name)
 
-    # Goku & Vegeta (JUS): idle 0-3, dash 4-7
+    # Vegeta (JUS): idle 0-3, dash 4-7. Goku, base Gohan and Piccolo come from make_eb.py and make_npcs.py.
     for who, family, forms in (
-        ("goku", {(8, 8, 8), (57, 57, 49)}, ["base", "ssj", "ssj2", "ssj3", "god", "blue", "ui"]),
         ("vegeta", {(8, 8, 8), (74, 74, 74)}, ["base", "ssj", "ssj2", "blue", "ue"]),
     ):
         idle, move = frames_for("jus_" + who, [0, 1, 2, 3], [4, 5, 6, 7])
@@ -270,22 +269,13 @@ def build():
 
     # Gohan (Extreme Butoden, drawn as SSJ): stance 13-16, step 18,19,20,19
     idle, move = frames_for("eb_gohan", [13, 14, 15, 16], [18, 19, 20, 19])
-    for form, ramp in (("base", "black"), ("ssj", None), ("ssj2", "ssj2"), ("ult", "black"), ("beast", "white")):
+    idle, move = [ImageOps.mirror(f) for f in idle], [ImageOps.mirror(f) for f in move]   # EB faces left
+    for form, ramp in (("ssj", None), ("ssj2", "ssj2"), ("ult", "black"), ("beast", "white")):
         def conv(f, ramp=ramp):
             f = f if ramp is None else paint(f, gohan_hair_mask(f), RAMPS[ramp])
             return palette_downscale(f, 0.42)
         save("gohan" if form == "base" else "gohan_" + form, [conv(f) for f in idle], [conv(f) for f in move])
 
-    # Piccolo (GT Transformation): six idle frames fused in box 0, flying frames 10 and 11 (two frames)
-    pic = FRAMES["gt_piccolo"]
-    idle6 = split_even(tuple(pic[0]), 6)
-    fly = [tuple(pic[10])] + split_even(tuple(pic[11]), 2)
-    idle, move = frames_for("gt_piccolo", [idle6[0], idle6[1], idle6[2], idle6[4]], [fly[0], fly[1], fly[2], fly[1]])
-    idle = [palette_downscale(tighten(main_blob(f)), 0.5) for f in idle]
-    move = [palette_downscale(tighten(main_blob(f)), 0.5) for f in move]
-    save("piccolo", idle, move)
-    orange = ((255, 176, 72), (236, 120, 30), (150, 64, 16))
-    save("piccolo_orange", [recolor_hue(f, 90, 160, orange) for f in idle], [recolor_hue(f, 90, 160, orange) for f in move])
     return made
 
 

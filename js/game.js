@@ -1,10 +1,10 @@
 'use strict';
 (() => {
-  const { TECHS, PASSIVES, CHARS, GRUNT_TYPES, SAGAS, FUSIONS, CAPSULES, ITEMS, RIFT_BOSSES } = window.ZS_DATA;
+  const { TECHS, PASSIVES, CHARS, GRUNT_TYPES, SAGAS, FUSIONS, CAPSULES, ITEMS, RIFT_BOSSES, GACHA, ART_DENSITY, ULTS, LR_PANELS } = window.ZS_DATA;
   const TAU = Math.PI * 2;
   const SAGA_TIME = 90;          // seconds before a saga's boss shows up
   const MAX_ENEMIES = 260;
-  const FUSE_WINDOW = 5, FUSE_TIME = 120, FUSE_COOLDOWN = 300, REVIVE_TIME = 3;
+  const FUSE_WINDOW = 5, FUSE_TIME = 30, FUSE_COOLDOWN = 120, REVIVE_TIME = 3;
   const FINE = 2;                // canvas pixels per world unit; 16px art draws 2x, hd/ art draws 1:1
   const rand = (a, b) => a + Math.random() * (b - a);
   const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
@@ -40,6 +40,7 @@
       for (const n of biomeArt(g.biome)) s.add(n);
     }
     for (const c of Object.values(CAPSULES)) s.add(c.sprite);
+    s.add('ticket'); s.add('shenron'); s.add('loot_capsule'); for (const n of FX_NAMES) s.add(n);
     for (const it of Object.values(ITEMS)) s.add(it.sprite);
     for (const b of RIFT_BOSSES) { s.add(b.s); if (b.rage) s.add(b.rage); }
     return [...s];
@@ -59,7 +60,8 @@
         x.globalCompositeOperation = 'source-in'; x.fillStyle = '#fff'; x.fillRect(0, 0, c.width, c.height);
         const hd = name.startsWith('hd/');
         // hd/ sheets are horizontal strips of square frames
-        ART[name] = { img: im, white: c, hd, density: hd ? 2 : 1, fw: hd ? im.height : im.width, fh: im.height, frames: hd ? Math.round(im.width / im.height) : 1 };
+        const strip = hd || (name.startsWith('fx/') && !/beam_|drill_/.test(name));   // fx/ strips are square frames too
+        ART[name] = { img: im, white: c, hd, density: hd ? (ART_DENSITY[name] || 2) : 1, fw: strip ? im.height : im.width, fh: im.height, frames: strip ? Math.round(im.width / im.height) : 1 };
         res();
       };
       im.onerror = () => { ART[name] = null; res(); };
@@ -150,6 +152,7 @@
   cv.addEventListener('pointerdown', e => {
     audioInit();
     if (e.pointerType === 'mouse') {
+      if (e.button === 2) { ultPressed(); return; }
       if (e.button !== 0) return;
       mouse.on = true; mouse.id = e.pointerId; mouse.x = e.clientX; mouse.y = e.clientY; cv.setPointerCapture(e.pointerId); return;
     }
@@ -163,6 +166,7 @@
   const joyEnd = e => { if (e.pointerId === joy.id) joy.on = false; if (e.pointerId === mouse.id) mouse.on = false; };
   function mouseMove(p) {
     if (!mouse.on || !p || !G) return null;
+    if (p.absorbed && G.fusion) p = G.fusion.ctrl;
     const sx = (p.x - G.cx) * Z + W / 2, sy = (p.y - 4 - G.cy) * Z + H / 2;
     const dx = mouse.x - sx, dy = mouse.y - sy, d = Math.hypot(dx, dy);
     return d < 12 ? [0, 0] : [dx / d, dy / d];
@@ -184,13 +188,14 @@
       const gp = list[i], prev = pads[i] || {};
       if (!gp) { pads[i] = {}; continue; }
       const b = n => !!(gp.buttons[n] && gp.buttons[n].pressed);
-      const now = { a: b(0), y: b(3), lb: b(4), rb: b(5), start: b(9), up: b(12), down: b(13), x: gp.axes[0] || 0, ay: gp.axes[1] || 0, l: b(14), r: b(15) };
+      const now = { a: b(0), xb: b(2), y: b(3), lb: b(4), rb: b(5), start: b(9), up: b(12), down: b(13), x: gp.axes[0] || 0, ay: gp.axes[1] || 0, l: b(14), r: b(15) };
       now.pressA = now.a && !prev.a; now.pressStart = now.start && !prev.start;
       const pl = G && (isClient() ? (i === 0 ? G.players[NET.me] : null) : G.players[padOwner(i, nPads, nPl)]);
       if (pl && state === 'play') {
         if (now.lb && !prev.lb) selectSlot(pl, (pl.active - 1 + pl.slots.length) % pl.slots.length);
         if (now.rb && !prev.rb) selectSlot(pl, (pl.active + 1) % pl.slots.length);
         if (now.y && !prev.y) openBond(pl);
+        if (now.xb && !prev.xb) { if (isClient()) sendHost({ t: 'ult' }); else castUltimate(pl); }
       }
       if (state === 'wish' && now.pressA) (isClient() ? remoteWish : chooseWish)(wishFocus);
       if (state === 'wish' && ((now.up && !prev.up) || (now.down && !prev.down))) moveWishFocus(now.up ? -1 : 1);
@@ -203,7 +208,13 @@
       } else if (now.pressA && pl) { if (isClient()) sendHost({ t: 'fuse' }); else fusePressed(pl); }
     }
   }
+  // A fusion splits the controls: the shooter (Goku in Gogeta, Vegeta in Vegito) aims, the partner steers.
   function moveInput(p) {
+    const F = p.fusion;
+    if (F && G.fusion && !isBot(F.other) && !F.other.left && !(window.ZS && window.ZS.bot)) { F.aim = rawInput(p); return rawInput(F.other); }
+    return rawInput(p);
+  }
+  function rawInput(p) {
     if (p.remote) { const r = NET.inputs[p.idx] || { x: 0, y: 0 }; return [r.x, r.y]; }
     if (isHost() && p.idx === 0) return localInput(p);
     let x = 0, y = 0;
@@ -251,7 +262,7 @@
   }
 
   // ------------------------------------------------------------ state
-  let state = 'loading';   // loading | title | play | levelup | transform | fusing | paused | over
+  let state = 'loading';   // loading | title | play | intro | levelup | transform | fusing | paused | over
   let G = null;
   let best = {}; try { best = JSON.parse(localStorage.getItem('zs-best') || '{}'); } catch (e) { best = {}; }
   const xpFor = l => Math.floor(5 + l * 4 + l * l * 0.6);
@@ -259,10 +270,10 @@
 
   function makePlayer(idx, charId, x) {
     const C = CHARS[charId];
-    const p = { idx, charId, C, x, y: 0, kvx: 0, kvy: 0, hp: C.hp, form: 0, techs: {}, passives: {}, iframe: 0, revive: charId === 'goku',
+    const p = { idx, charId, C, x, y: 0, kvx: 0, kvy: 0, hp: C.hp, form: 0, techs: {}, passives: {}, iframe: 0, revive: !!C.revive,
       anim: 0, moving: false, hurtT: 0, face: 1, down: false, reviveT: 0, absorbed: false, fusion: null, announced: new Set(),
       buffs: { speed: 0, dex: 0, power: 0 }, item: null, itemCD: 0, poleT: 2,
-      slots: [], active: 0, bonds: 0, wish: { might: 1, hp: 1, speed: 1 } };
+      slots: [], active: 0, bonds: 0, wish: { might: 1, hp: 1, speed: 1 }, energy: 0, ultLock: 0 };
     for (const [id, lv] of C.techs) if (lv <= 1) p.announced.add(id);
     return p;
   }
@@ -275,12 +286,12 @@
       shake: 0, flash: 0, flashCol: '#fff', over9000: false, tf: null, cx: 0, cy: 0,
       fusion: null, fuseReq: null, fuseCD: 0, fusing: null,
       rift: null, riftT: 120, riftCount: 0, riftOrder: shuffle(RIFT_BOSSES.map((_, i) => i)), arena: null,
-      capsTaken: new Set(), capsSpawned: new Set(),
+      capsTaken: new Set(), capsSpawned: new Set(), ults: [], lootT: 45,
     };
     chunks = new Map();
     G.players = charIds.map((id, i) => makePlayer(i, id, (i - (charIds.length - 1) / 2) * 20));
     for (const p of G.players) { addTech(p, p.C.start); recalc(p); p.hp = p.ps.maxHp; p.remote = isHost() && p.idx > 0; }
-    hudKey = ''; techKey = ''; buildPlayerCards();
+    hudKey = ''; techKey = ''; buildPlayerCards(); preloadCinematics();
     $('title').hidden = true; $('over').hidden = true; $('hud').hidden = false;
     state = 'play';
     sagaBanner();
@@ -318,14 +329,14 @@
     const s = {};
     s.might = (1 + 0.1 * pv('gravity')) * f.power * (C.might || 1) * p.wish.might;
     if (p.techs.kaioken) s.might *= 1 + TECHS.kaioken.stats(p.techs.kaioken.lv).might;
-    s.cd = Math.max(0.4, 1 - 0.07 * pv('kicontrol'));
-    s.area = 1 + 0.1 * pv('divine');
-    s.speed = C.speed * (1 + 0.08 * pv('weights')) * (1 + 0.025 * p.form) * p.wish.speed;
+    s.cd = Math.max(0.4, 1 - 0.07 * pv('kicontrol')) * (C.cdMul || 1);
+    s.area = (1 + 0.1 * pv('divine')) * (C.area || 1);
+    s.speed = C.speed * 1.15 * (1 + 0.08 * pv('weights')) * (1 + 0.025 * p.form) * p.wish.speed;
     s.magnet = 36 * (1 + 0.35 * pv('scouter')) * (p.item === 'radar' ? 1.6 : 1);
     s.armor = pv('armor') + p.form * 0.5;
     s.maxHp = (C.hp + 20 * pv('zenkai') + 15 * p.form) * (p.item === 'potara' ? 1.15 : 1) * p.wish.hp;
     s.dodge = 0.05 * pv('afterimage') + (f.dodge || 0);
-    s.xp = 1 + 0.12 * pv('turtle');
+    s.xp = (1 + 0.12 * pv('turtle')) * (C.xpMul || 1);
     return s;
   }
   function recalc(p) {
@@ -371,7 +382,20 @@
     for (const p of bodies()) { const d = d2(x, y, p.x, p.y); if (d < bd) { bd = d; best = p; } }
     return best;
   }
-  function visibleEnemies() { return G.enemies.filter(e => !e.dead && onScreen(e, -4)); }
+  function visibleEnemies(p) {   // enemies on the firing fighter's own screen
+    const c = p || { x: G.cx, y: G.cy };
+    return G.enemies.filter(e => !e.dead && Math.abs(e.x - c.x) < VW / 2 - 4 && Math.abs(e.y - c.y) < VH / 2 - 4);
+  }
+  const OWNED = () => [G.shots, G.beams, G.bombs, G.hz, G.fx, G.texts];
+  function marks() { return OWNED().map(a => a.length); }
+  function tagSince(m, own) { OWNED().forEach((a, k) => { for (let i = m[k]; i < a.length; i++) if (a[i].own === undefined) a[i].own = own; }); }
+  const online = () => !!(NET.role && NET.started);
+  function viewIdx() {
+    const me = G.players[NET.role === 'client' ? NET.me : 0];
+    if (!me) return -1;
+    return me.absorbed && G.fusion ? G.fusion.ctrl.idx : me.idx;
+  }
+  const seen = o => !online() || o.own === undefined || o.own === viewIdx();
   function shuffle(a) { for (let i = a.length - 1; i > 0; i--) { const j = (Math.random() * (i + 1)) | 0; [a[i], a[j]] = [a[j], a[i]]; } return a; }
 
   // spatial grid for enemy queries
@@ -429,11 +453,13 @@
   function kill(e) {
     if (e.dead) return;
     e.dead = true; G.kills++;
+    creditKill(e);
     burst(e.x, e.y, '#fff', 5, 60);
     burst(e.x, e.y, e.boss ? e.color : '#ffd86a', e.boss ? 40 : 3, e.boss ? 140 : 40, e.boss ? 1 : 0.4);
     dropOrb(e.x, e.y, e.xp);
     if (!e.boss) {
       const r = Math.random();
+      if (Math.random() < 0.0008) G.pickups.push({ x: e.x, y: e.y, kind: 'ticket', t: 0 });
       if (r < 0.004) G.pickups.push({ x: e.x, y: e.y, kind: 'senzu', t: 0 });
       else if (r < 0.013) dropCapsule(e.x, e.y);
     } else if (e.rift) riftBossDefeated(e);
@@ -482,14 +508,14 @@
     beam(T, st, inst, p) {
       const len = st.len * p.ps.area, tg = nearest(p.x, p.y, len * 0.9);
       if (!tg) return false;
-      G.beams.push({ src: p, ang: Math.atan2(tg.y - p.y, tg.x - p.x), len, width: st.width * Math.sqrt(p.ps.area), life: st.dur, max: st.dur,
+      G.beams.push({ src: p, ang: aimAng(p, tg), len, width: st.width * Math.sqrt(p.ps.area), life: st.dur, max: st.dur,
         dmg: st.dmg * might(p), tick: T.tick || 0.12, tt: 0, col: T.color, core: T.core, style: T.style, spiral: T.spiral, grow: 0 });
       sfx('beam'); return true;
     },
     shot(T, st, inst, p) {
       const tg = nearest(p.x, p.y, 230);
       if (!tg) return false;
-      const base = Math.atan2(tg.y - p.y, tg.x - p.x);
+      const base = aimAng(p, tg);
       if (st.burst) { inst.queue = st.count; inst.qt = 0; inst.qint = st.burst / st.count; return true; }
       for (let i = 0; i < st.count; i++) spawnShot(p, T, st, base + (i - (st.count - 1) / 2) * st.spread, p.x, p.y - 3);
       return true;
@@ -497,13 +523,17 @@
     nova(T, st, inst, p) {
       const r = st.radius * p.ps.area, dmg = st.dmg * might(p);
       if (!nearest(p.x, p.y, r)) return false;
-      query(p.x, p.y, r, e => { const d = Math.hypot(e.x - p.x, e.y - p.y) || 1; hurt(e, dmg, (e.x - p.x) / d * 160, (e.y - p.y) / d * 160, T.color); });
+      query(p.x, p.y, r, e => {
+        const d = Math.hypot(e.x - p.x, e.y - p.y) || 1;
+        hurt(e, dmg, (e.x - p.x) / d * 160, (e.y - p.y) / d * 160, T.color);
+        if (st.stun) e.stunT = Math.max(e.stunT || 0, e.boss ? st.stun * 0.3 : st.stun);
+      });
       G.fx.push({ type: 'ring', x: p.x, y: p.y, r, life: 0.4, max: 0.4, col: T.color });
       if (T.flash) { G.flash = 0.6; G.flashCol = T.color; G.shake = 8; }
       sfx('boom'); return true;
     },
     strike(T, st, inst, p) {
-      const vis = shuffle(visibleEnemies()); if (!vis.length) return false;
+      const vis = shuffle(visibleEnemies(p)); if (!vis.length) return false;
       const dmg = st.dmg * might(p);
       for (let i = 0; i < Math.min(st.count, vis.length); i++) {
         const e = vis[i];
@@ -514,7 +544,7 @@
       sfx('hit'); return true;
     },
     bomb(T, st, inst, p) {
-      const vis = visibleEnemies(); if (!vis.length) return false;
+      const vis = visibleEnemies(p); if (!vis.length) return false;
       const r = st.radius * p.ps.area;
       let bestE = null, bestN = -1;
       for (const e of shuffle(vis).slice(0, 16)) { let n = 0; query(e.x, e.y, r, () => { n++; }); if (n > bestN) { bestN = n; bestE = e; } }
@@ -524,22 +554,22 @@
     },
     dragon(T, st, inst, p) {
       const tg = nearest(p.x, p.y, 260); if (!tg) return false;
-      const a = Math.atan2(tg.y - p.y, tg.x - p.x);
-      G.shots.push({ x: p.x, y: p.y, vx: Math.cos(a) * st.speed, vy: Math.sin(a) * st.speed, r: st.size * Math.sqrt(p.ps.area), dmg: st.dmg * might(p),
+      const a = aimAng(p, tg);
+      G.shots.push({ x: p.x + Math.cos(a) * HAND, y: p.y + Math.sin(a) * HAND, vx: Math.cos(a) * st.speed, vy: Math.sin(a) * st.speed, r: st.size * Math.sqrt(p.ps.area), dmg: st.dmg * might(p),
         pierce: 999, life: st.life, col: T.color, core: T.core, style: 'dragon', hit: new Set(), trail: [] });
       G.shake = Math.max(G.shake, 3); sfx('beam'); return true;
     },
     hellzone(T, st, inst, p) {
-      const tg = nearest(p.x, p.y, 200) || shuffle(visibleEnemies())[0]; if (!tg) return false;
+      const tg = nearest(p.x, p.y, 200) || shuffle(visibleEnemies(p))[0]; if (!tg) return false;
       const n = st.count, dmg = st.dmg * might(p);
       for (let i = 0; i < n; i++) {
         const a = i / n * TAU + rand(-0.2, 0.2), R = rand(42, 62);
-        G.hz.push({ x: tg.x + Math.cos(a) * R, y: tg.y + Math.sin(a) * R, cx: tg.x, cy: tg.y, wait: 0.55 + i * 0.03, dmg, r: st.radius * p.ps.area, col: T.color, core: T.core });
+        G.hz.push({ x: tg.x + Math.cos(a) * R, y: tg.y + Math.sin(a) * R, cx: tg.x, cy: tg.y, wait: 0.55 + i * 0.03, dmg, r: st.radius * p.ps.area, col: T.color, core: T.core, ghost: T === TECHS.ghost_kamikaze });
       }
       sfx('shot'); return true;
     },
     erase(T, st, inst, p) {
-      const vis = shuffle(visibleEnemies()); if (!vis.length) return false;
+      const vis = shuffle(visibleEnemies(p)); if (!vis.length) return false;
       let n = st.count;
       for (const e of vis) {
         if (n <= 0) break;
@@ -551,7 +581,9 @@
       return true;
     },
   };
+  const HAND = 10;   // how far in front of the fighter attacks start
   function spawnShot(p, T, st, ang, x, y) {
+    x += Math.cos(ang) * HAND; y += Math.sin(ang) * HAND;
     G.shots.push({ x, y, vx: Math.cos(ang) * st.speed, vy: Math.sin(ang) * st.speed, r: st.size * Math.sqrt(p.ps.area), dmg: st.dmg * might(p),
       pierce: st.pierce || 1, life: 1.4, col: T.color, core: T.core, style: T.style, hit: new Set() });
     sfx('shot');
@@ -589,7 +621,7 @@
         inst.qt -= dt;
         while (inst.qt <= 0 && inst.queue > 0) {
           const tg = nearest(p.x, p.y, 240);
-          const base = tg ? Math.atan2(tg.y - p.y, tg.x - p.x) : rand(0, TAU);
+          const base = aimAng(p, tg);
           spawnShot(p, T, st, base + rand(-st.spread / 2, st.spread / 2), p.x, p.y - 3);
           inst.queue--; inst.qt += inst.qint;
         }
@@ -602,6 +634,250 @@
   function clonePos(p, inst, i, n) { const a = inst.ang + i / n * TAU; return [p.x + Math.cos(a) * 26, p.y + Math.sin(a) * 18]; }
   function hasTech(p, id) { return techActive(p, id); }
   function techOf(p, id) { return p.techs[id] || p.fusion.other.techs[id]; }
+
+  // ------------------------------------------------------------ aiming inside a fusion
+  // The shooter (Goku in Gogeta, Vegeta in Vegito) steers the aim with their movement input; with no input, attacks auto-target.
+  function aimOn(p) { const a = p.fusion && p.fusion.aim; return !!a && Math.hypot(a[0], a[1]) > 0.3; }
+  function aimAng(p, tg) {
+    if (aimOn(p)) return Math.atan2(p.fusion.aim[1], p.fusion.aim[0]);
+    return tg ? Math.atan2(tg.y - p.y, tg.x - p.x) : rand(0, TAU);
+  }
+
+  // ------------------------------------------------------------ energy & ultimate moves
+  // Energy fills from defeated enemies (the fighter whose attack landed the kill gets it).
+  // At 100, Q / right-click / gamepad X fires the fighter's signature ultimate.
+  const ENERGY_MAX = 100;
+  function creditKill(e) {
+    let p = (G.killer !== undefined && G.players[G.killer]) || nearestBody(e.x, e.y);
+    if (!p) return;
+    if (p.absorbed && G.fusion) p = G.fusion.ctrl;
+    if (p.ultLock > 0) return;   // an ultimate's own kills don't refill it
+    const before = p.energy || 0;
+    p.energy = Math.min(ENERGY_MAX, before + (e.boss ? 40 : 1));
+    if (before < ENERGY_MAX && p.energy >= ENERGY_MAX) {
+      const m = marks();
+      text(p.x, p.y - 22, 'ULTIMATE READY', '#ffe24a', true); sfx('pick');
+      tagSince(m, p.idx);
+    }
+  }
+  const ultKeyName = p => !online() && coop() ? ['Q', 'Num .', 'N', 'pad X'][p.idx] || 'pad X' : 'Q';
+  function ultOf(body) { return ULTS[body.fusion ? G.fusion.kind : body.charId] || ULTS.goku; }
+  function ultPressed() {   // right-click or Q at this computer
+    if (!G || state !== 'play') return;
+    if (isClient()) sendHost({ t: 'ult' }); else castUltimate(G.players[0]);
+  }
+  function castUltimate(p) {
+    if (!G || state !== 'play' || !p || p.down) return;
+    if (p.absorbed) { toast('In a fusion, ' + pName(G.fusion.ctrl) + ' fires the ultimate'); return; }
+    const body = p;
+    if ((body.energy || 0) < ENERGY_MAX) { toast(pName(body) + ': ultimate at ' + Math.floor(body.energy || 0) + '% energy'); return; }
+    body.energy = 0;
+    const U = ultOf(body);
+    body.ultLock = (U.dur || 0) + 3;
+    const m = might(body) * (1 + 0.08 * G.level);
+    ultCutin(body, U);
+    G.flash = 0.7; G.flashCol = U.color; G.shake = 10; sfx('transform'); sfx('beam');
+    const mk = marks();
+    const tg = nearest(body.x, body.y, 600);
+    const ang = aimOn(body) || tg ? aimAng(body, tg) : (body.face < 0 ? Math.PI : 0);
+    if (U.kind === 'beam') {
+      G.beams.push({ src: body, ang, len: U.len, width: U.width, life: U.dur, max: U.dur, dmg: U.dmg * m, tick: U.tick || 0.1, tt: 0,
+        col: U.color, core: U.core, style: U.style, spiral: U.spiral, grow: 0 });
+    } else if (U.kind === 'bomb') {
+      const vis = visibleEnemies(body);
+      let tgt = null, bestN = -1;
+      for (const e of shuffle(vis).slice(0, 20)) { let n = 0; query(e.x, e.y, U.radius * 0.6, () => { n++; }); if (n > bestN) { bestN = n; tgt = e; } }
+      const tx = tgt ? tgt.x : body.x + Math.cos(ang) * 140, ty = tgt ? tgt.y : body.y + Math.sin(ang) * 140;
+      G.bombs.push({ src: body, x: body.x, y: body.y - 24, tx, ty, target: tgt, charge: U.charge, chargeMax: U.charge, speed: U.speed,
+        size: U.size, radius: U.radius, dmg: U.dmg * m, col: U.color, core: U.core, life: 6 });
+    } else if (U.kind === 'discs') {
+      for (let i = 0; i < U.count; i++) {
+        const a = ang + i / U.count * TAU;
+        G.shots.push({ x: body.x + Math.cos(a) * HAND, y: body.y - 3 + Math.sin(a) * HAND, vx: Math.cos(a) * 200, vy: Math.sin(a) * 200, r: 9,
+          dmg: U.dmg * m, pierce: 999, life: 2.6, col: U.color, core: U.core, style: 'disc', hit: new Set() });
+      }
+    } else {
+      G.ults.push({ U, body, m, t: 0, next: 0, done: 0, ang });
+    }
+    tagSince(mk, body.idx);
+  }
+  // multi-step ultimates: repeated strikes, pulses, a barrage, a ghost swarm
+  function updateUlts(dt) {
+    for (const u of G.ults) {
+      const { U, body, m } = u;
+      if (body.down || body.absorbed) { u.over = true; continue; }
+      u.t += dt; u.next -= dt;
+      const mk = marks(); G.killer = body.idx;
+      if (U.kind === 'strikes' && u.next <= 0) {
+        u.next = U.every;
+        for (const e of visibleEnemies(body)) {
+          G.fx.push({ type: 'dash', x: body.x, y: body.y, x2: e.x, y2: e.y, life: 0.15, max: 0.15, col: U.color });
+          G.fx.push({ type: 'impact', x: e.x, y: e.y, life: 0.25, max: 0.25, col: U.color });
+          hurt(e, U.dmg * m, 0, 0, U.color);
+        }
+        sfx('hit');
+        if (++u.done >= U.hits) u.over = true;
+      } else if (U.kind === 'pulses' && u.next <= 0) {
+        u.next = U.every;
+        query(body.x, body.y, U.radius, e => {
+          const d = Math.hypot(e.x - body.x, e.y - body.y) || 1;
+          hurt(e, U.dmg * m, (e.x - body.x) / d * 220, (e.y - body.y) / d * 220, U.color);
+          if (U.stun) e.stunT = Math.max(e.stunT || 0, e.boss ? U.stun * 0.3 : U.stun);
+        });
+        G.fx.push({ type: 'ring', x: body.x, y: body.y, r: U.radius, life: 0.45, max: 0.45, col: U.color });
+        if (U.flash) { G.flash = 0.8; G.flashCol = U.color; }
+        G.shake = Math.max(G.shake, 6); sfx('boom');
+        if (++u.done >= U.n) u.over = true;
+      } else if (U.kind === 'barrage') {
+        const per = U.dur / U.count;
+        while (u.next <= 0 && u.done < U.count) {
+          u.next += per; u.done++;
+          const tg = shuffle(visibleEnemies(body))[0];
+          const a = tg ? Math.atan2(tg.y - body.y, tg.x - body.x) + rand(-0.15, 0.15) : rand(0, TAU);
+          G.shots.push({ x: body.x + Math.cos(a) * HAND, y: body.y - 3 + Math.sin(a) * HAND, vx: Math.cos(a) * 260, vy: Math.sin(a) * 260, r: 4,
+            dmg: U.dmg * m, pierce: 2, life: 1.4, col: U.color, core: U.core, hit: new Set() });
+        }
+        if (u.done >= U.count) u.over = true;
+        sfx('shot');
+      } else if (U.kind === 'ghosts' && !u.done) {
+        u.done = 1;
+        const vis = shuffle(visibleEnemies(body));
+        for (let i = 0; i < U.count; i++) {
+          const e = vis[i % Math.max(1, vis.length)], a = rand(0, TAU);
+          const cx = e ? e.x : body.x + Math.cos(a) * 80, cy = e ? e.y : body.y + Math.sin(a) * 80;
+          G.hz.push({ x: body.x + rand(-12, 12), y: body.y - 10 + rand(-8, 8), cx, cy, wait: 0.2 + i * 0.06, dmg: U.dmg * m, r: 30, col: U.color, core: U.core, ghost: true });
+        }
+        u.over = true;
+      }
+      tagSince(mk, body.idx); G.killer = undefined;
+    }
+    G.ults = G.ults.filter(u => !u.over);
+  }
+
+  // ------------------------------------------------------------ loot capsules
+  // Capsule Corp capsules sit around the map, and more drop in as supplies (bosses leave one too).
+  // Stand next to one for 3 seconds to open it: random capsules, maybe a ticket or senzu, and a good chance at a Dragon Ball.
+  const LOOT_OPEN = 3, LOOT_R = 22;
+  function spawnSupplyDrop() {
+    const c = randomBody();
+    for (let i = 0; i < 20; i++) {
+      const a = rand(0, TAU), R = rand(120, 220), x = c.x + Math.cos(a) * R, y = c.y + Math.sin(a) * R;
+      if (solidsNear(x, y).some(s => Math.hypot(s.x - x, s.y - y) < s.cr + 14)) continue;
+      G.pickups.push({ x, y, kind: 'loot', t: 0, prog: 0 });
+      toast('A Capsule Corp capsule landed nearby');
+      return;
+    }
+  }
+  function openLoot(k) {
+    k.got = true;
+    burst(k.x, k.y, '#f2c43a', 22, 70); burst(k.x, k.y, '#ffffff', 10, 50);
+    G.fx.push({ type: 'ring', x: k.x, y: k.y, r: 40, life: 0.4, max: 0.4, col: '#f2c43a' });
+    sfx('boom'); sfx('pick');
+    const drops = [];
+    const n = 1 + (Math.random() < 0.45 ? 1 : 0);
+    for (let i = 0; i < n; i++) { const t = Math.random() < 0.15 ? 'item' : pickCap(); dropCapsule(k.x + rand(-16, 16), k.y + rand(-10, 10), t); drops.push(CAPSULES[t].name); }
+    if (Math.random() < 0.12) { G.pickups.push({ x: k.x + rand(-12, 12), y: k.y + 8, kind: 'senzu', t: 0 }); drops.push('Senzu Bean'); }
+    if (Math.random() < 0.1) { dropTickets(k.x, k.y, 1); drops.push('Summon ticket'); }
+    const dbOut = G.dragonBalls + G.pickups.filter(q => q.kind === 'dragonball' && !q.got).length;
+    if (dbOut < 7 && Math.random() < (k.boss ? 0.85 : 0.4)) { G.pickups.push({ x: k.x, y: k.y - 12, kind: 'dragonball', t: 0 }); drops.push('a Dragon Ball!'); }
+    text(k.x, k.y - 16, 'CAPSULE OPENED', '#f2c43a', true);
+    toast('Capsule: ' + drops.join(', '));
+  }
+  function drawLoot(k) {   // big capsule with a soft beacon; shakes and fills a ring while someone stands next to it
+    ctx.globalAlpha = 0.16 + 0.08 * Math.sin(k.t * 3); circ(k.x, k.y, 15, '#f2c43a'); ctx.globalAlpha = 1;
+    ctx.fillStyle = 'rgba(0,0,0,0.3)'; ctx.fillRect(Math.round(k.x - 10), Math.round(k.y + 7), 20, 2);
+    const shake = k.prog > 0 ? Math.sin(k.t * 40) * Math.min(1.5, k.prog * 0.6) : 0;
+    sprite('loot_capsule', k.x + shake, k.y);
+    if (k.prog > 0) {
+      const f = Math.min(1, k.prog / LOOT_OPEN);
+      ctx.strokeStyle = 'rgba(10,12,28,0.7)'; ctx.lineWidth = 2.5; ctx.beginPath(); ctx.arc(k.x, k.y, 17, 0, TAU); ctx.stroke();
+      ctx.strokeStyle = '#ffd83a'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(k.x, k.y, 17, -Math.PI / 2, -Math.PI / 2 + f * TAU); ctx.stroke();
+    } else {
+      ctx.textAlign = 'center'; ctx.font = '4px "Press Start 2P", monospace';
+      ctx.fillStyle = 'rgba(255,240,200,' + (0.55 + 0.3 * Math.sin(k.t * 4)).toFixed(2) + ')'; ctx.fillText('CAPSULE', k.x, k.y - 12);
+    }
+  }
+
+  // ------------------------------------------------------------ cinematics: boss intros, ultimate cut-ins, the SSJ clip
+  // Boss intro: the game holds for a moment on a title card (art/full/<art>.webp, or the boss's sprite blown up).
+  const INTRO_TIME = 2.8;
+  function bossIntro(def, name, sub) {
+    const info = { name, title: def.title || '', quote: def.quote || '', sub: sub || '', color: def.color, art: def.art || '', s: def.s };
+    showIntro(info); netEvent(['bi', info]);
+    G.introT = INTRO_TIME; state = 'intro';
+    sfx('boss');
+  }
+  function showIntro(I) {
+    const el = $('intro');
+    el.style.setProperty('--c', I.color);
+    $('in-art').innerHTML = I.art ? `<img src="art/full/${I.art}.webp" alt="">` : portrait(I.s, 'in-spr');
+    $('in-name').textContent = I.name;
+    $('in-title').textContent = I.title + (I.sub ? ' · ' + I.sub : '');
+    $('in-quote').textContent = I.quote ? '“' + I.quote + '”' : '';
+    el.hidden = false; el.classList.remove('go'); void el.offsetWidth; el.classList.add('go');
+  }
+  function hideIntro() { $('intro').hidden = true; }
+  function endIntro() { hideIntro(); if (state === 'intro') state = 'play'; G.introT = 0; }
+
+  // Ultimate cut-in: a band slides in from the fighter's side of the screen with their portrait and battle cry.
+  function cutKey(body) { if (body.fusion) return ''; const f = curForm(body); return f.cut || body.C.cut || ''; }
+  let cutinTimer = 0;
+  function showCutin(I) {
+    const el = $('cutin'), band = el.firstElementChild;
+    const sx = G ? (I.x - G.cx) * Z + W / 2 : W / 2, sy = G ? (I.y - G.cy) * Z + H / 2 : H / 2;
+    const bh = Math.min(200, H * 0.3);
+    el.style.setProperty('--c', I.color);
+    el.style.setProperty('--top', clamp(sy - bh / 2, 70, H - bh - 90) + 'px');
+    el.style.setProperty('--bh', bh + 'px');
+    el.className = sx < W / 2 ? 'from-left' : 'from-right';
+    $('ci-art').innerHTML = I.key ? `<div class="ci-anim" style="background-image:url('art/cutin/${I.key}.webp')"></div>` : portrait(I.sprite, 'ci-spr');
+    $('ci-quote').textContent = I.quote;
+    $('ci-name').textContent = I.who + ' · ' + I.name;
+    el.hidden = false; band.classList.remove('go'); void band.offsetWidth; band.classList.add('go');
+    clearTimeout(cutinTimer); cutinTimer = setTimeout(() => { el.hidden = true; }, 1700);
+  }
+  function ultCutin(body, U) {
+    const I = { key: cutKey(body), sprite: curForm(body).sprite, quote: U.quote || U.name + '!', name: U.name, color: U.color, x: body.x, y: body.y,
+      who: body.fusion ? FUSIONS[G.fusion.kind].name : pName(body) };
+    showCutin(I); netEvent(['ci', I]);
+  }
+
+  // Goku's first Super Saiyan: the anime clip plays over the transformation (click or any key skips it).
+  const CLIP_TIME = 6.9, CLIP_FLIP = 4.9;
+  let clipBlob = null, clipUrl = '';
+  function preloadClip() {
+    if (clipBlob || !G || !G.players.some(p => p.charId === 'goku')) return;
+    clipBlob = 'loading';
+    fetch('art/fx/goku_ssj.webp').then(r => r.blob()).then(b => { clipBlob = b; }, () => { clipBlob = null; });
+  }
+  function playClip() {
+    if (clipUrl) URL.revokeObjectURL(clipUrl);
+    clipUrl = clipBlob instanceof Blob ? URL.createObjectURL(clipBlob) : '';
+    const img = document.createElement('img');   // a fresh element restarts the animation
+    img.src = clipUrl || 'art/fx/goku_ssj.webp?' + Date.now(); img.alt = '';
+    $('clip-box').replaceChildren(img);
+    $('clip').hidden = false;
+  }
+  function hideClip() { $('clip').hidden = true; $('clip-box').replaceChildren(); }
+  function skipCinematic() {   // host / offline only; returns true when it swallowed the input
+    if (!G || isClient()) return false;
+    if (state === 'intro') { G.introT = Math.min(G.introT, 0.2); return true; }
+    if (state === 'transform' && G.tf && G.tf.clip && !G.tf.skipped) {
+      G.tf.skipped = true; G.tf.t = Math.max(G.tf.t, G.tf.at - 0.05); G.tf.dur = G.tf.at + 0.8; hideClip(); netEvent(['clipx']);
+      return true;
+    }
+    return false;
+  }
+  $('intro').addEventListener('click', skipCinematic);
+  $('clip').addEventListener('click', skipCinematic);
+  function preloadCinematics() {
+    const keys = new Set();
+    for (const p of G.players) { if (p.C.cut) keys.add('cutin/' + p.C.cut); for (const f of p.C.forms) if (f.cut) keys.add('cutin/' + f.cut); }
+    for (const sg of SAGAS) if (sg.boss.art) keys.add('full/' + sg.boss.art);
+    for (const b of RIFT_BOSSES) if (b.art) keys.add('full/' + b.art);
+    for (const k of keys) { const im = new Image(); im.src = 'art/' + k + '.webp'; }
+    preloadClip();
+  }
 
   // ------------------------------------------------------------ fusion
   function blueUnlocked(p) { const i = p.C.forms.findIndex(f => f.short === 'Blue'); return i >= 0 && p.form >= i; }
@@ -678,7 +954,7 @@
       G.flash = 1; G.flashCol = '#fff'; G.shake = 12;
       pushEnemiesFrom(f.mx, f.my, Math.max(VW, VH), 320, 40 * might(ctrl), '#ffd83a');
       const F = FUSIONS[kind];
-      showBanner(F.name.toUpperCase() + '!', pName(ctrl) + ' leads. Press ' + fuseKeyName(ctrl) + ' to power up' + (G.fusion.maxForm < 2 ? ' (up to Super Saiyan)' : ' (up to Blue)'), '#ffd83a');
+      showBanner(F.name.toUpperCase() + '!', other.left || isBot(other) ? pName(ctrl) + ' leads. ' + fuseKeyName(ctrl) + ': power up' : pName(ctrl) + ' aims and fires, ' + pName(other) + ' steers. ' + fuseKeyName(ctrl) + ': power up' + (G.fusion.maxForm < 2 ? ' (up to Super Saiyan)' : ' (up to Blue)'), '#ffd83a');
     }
     if (f.t >= 2) { state = 'play'; G.fusing = null; }
   }
@@ -702,7 +978,7 @@
     G.fx.push({ type: 'ring', x: ctrl.x, y: ctrl.y, r: 120, life: 0.5, max: 0.5, col: '#fff' });
     G.flash = 0.6; G.flashCol = '#fff'; G.shake = 8;
     G.fuseCD = FUSE_COOLDOWN;
-    showBanner(forced ? 'FUSION BROKEN' : 'FUSION ENDED', 'Fusion recharges in 5:00', forced ? '#ff5050' : '#c8c4e0');
+    showBanner(forced ? 'FUSION BROKEN' : 'FUSION ENDED', 'Fusion recharges in ' + mmss(FUSE_COOLDOWN), forced ? '#ff5050' : '#c8c4e0');
   }
 
   // ------------------------------------------------------------ terrain
@@ -781,7 +1057,7 @@
     if (R() < 0.85) PIECES[pick(set.piece)](c, b, ox + 50 + R() * (CHUNK - 100), oy + 50 + R() * (CHUNK - 100), R, add);
     const np = 2 + (R() * 4 | 0);
     for (let i = 0; i < np; i++) { const k = PROPS[pick(set.props)]; add(k.s(b), ox + R() * CHUNK, oy + R() * CHUNK, k.cr); }
-    if (R() < 0.12) {
+    if (R() < 0.16) {
       const x = ox + 20 + R() * (CHUNK - 40), y = oy + 20 + R() * (CHUNK - 40);
       if (free(x, y, 6)) c.cap = { x, y, cap: pickCap(R), id: b + ':' + cx + ',' + cy };
     }
@@ -794,7 +1070,7 @@
     if (!c) { c = genChunk(cx, cy, b); chunks.set(key, c); }
     if (G && !G.client && c.cap && !G.capsSpawned.has(c.cap.id)) {
       G.capsSpawned.add(c.cap.id);
-      G.pickups.push({ x: c.cap.x, y: c.cap.y, kind: 'cap', cap: c.cap.cap, t: 0 });
+      G.pickups.push({ x: c.cap.x, y: c.cap.y, kind: 'loot', t: 0, prog: 0 });
     }
     return c;
   }
@@ -887,7 +1163,8 @@
   function spawnRift() {
     const def = RIFT_BOSSES[G.riftOrder[G.riftCount % RIFT_BOSSES.length]];
     for (let i = 0; i < 24; i++) {
-      const a = rand(0, TAU), R = rand(150, 230), x = G.cx + Math.cos(a) * R, y = G.cy + Math.sin(a) * R;
+      const c = online() ? randomBody() : { x: G.cx, y: G.cy };
+      const a = rand(0, TAU), R = rand(150, 230), x = c.x + Math.cos(a) * R, y = c.y + Math.sin(a) * R;
       if (solidsNear(x, y).some(s => Math.hypot(s.x - x, s.y - y) < s.cr + 16)) continue;
       G.rift = { x, y, t: 45, ph: 0, def };
       showBanner('A RIFT HAS OPENED', def.name + ' waits on the other side. Step in within 45 seconds.', '#b05aff');
@@ -908,11 +1185,11 @@
     const sc = sagaScale(), i = G.sagaIdx, hd = def.s.startsWith('hd/');
     const hp = 350 * Math.pow(2, i) * def.hp * teamMul(0.6);
     const b = { x: A.cx, y: A.cy - 60, s: def.s, boss: true, rift: true, def, name: def.name, color: def.color, moves: def.moves, hp, maxHp: hp,
-      spd: 40 + 2 * Math.min(i, 10), dmg: 14 * sc.dmg * 1.25, r: hd ? 7 * def.scale : 6 * def.scale, scale: def.scale, xp: 0, kvx: 0, kvy: 0, flash: 0, atkT: 2, act: null, ph: 0, face: 1 };
+      spd: 40 + 2 * Math.min(i, 10), dmg: 14 * sc.dmg * 1.25, r: def.r || (hd ? 7 * def.scale : 6 * def.scale), scale: def.scale, xp: 0, kvx: 0, kvy: 0, flash: 0, atkT: 2, act: null, ph: 0, face: 1 };
     G.enemies.push(b); A.boss = b;
     updateCamera();
     G.flash = 1; G.flashCol = '#b05aff'; G.shake = 10; sfx('transform');
-    showBanner(def.name.toUpperCase(), 'Rift battle: defeat them within 1:15', def.color);
+    bossIntro(def, def.name, 'Rift battle: win within 1:15');
   }
   function arenaClamp() {
     const A = G.arena;
@@ -942,6 +1219,7 @@
   }
   function riftBossDefeated(b) {
     grantBond();
+    dropTickets(b.x, b.y, 2);
     const A = G.arena;
     A.phase = 'won'; A.endT = 25; A.exit = { x: A.cx, y: A.cy + 20 };
     let xp = 0;
@@ -1010,6 +1288,7 @@
     const radar = bodies().some(p => hasItem(p, 'radar'));
     for (const k of G.pickups) {
       if (k.kind === 'dragonball') marks.push({ t: k, col: '#ff9a1a', icon: 'dragonball' });
+      else if (k.kind === 'loot' && d2(k.x, k.y, G.cx, G.cy) < 420 * 420) marks.push({ t: k, col: '#f2c43a', icon: 'loot_capsule' });
       else if (k.kind === 'cap' && (k.cap === 'item' || radar)) marks.push({ t: k, col: CAPSULES[k.cap].color, icon: CAPSULES[k.cap].sprite });
     }
     const mx = VW / 2 - 12, my = VH / 2 - 12;
@@ -1043,9 +1322,10 @@
     G.enemies.push({ x, y, s, hp, maxHp: hp, spd: 30 * T.spd * sc.spd * rand(0.9, 1.1), dmg: 4.5 * T.dmg * sc.dmg, r: T.r, scale: T.scale || 1,
       xp: T.xp * sc.xp, shoots: T.shoots, explodes: T.explodes, st: rand(1, 3), kvx: 0, kvy: 0, flash: 0, ph: rand(0, TAU) });
   }
-  function spawnRingPos() {
-    const a = rand(0, TAU), R = Math.hypot(VW, VH) / 2 + 16;
-    return [G.cx + Math.cos(a) * R, G.cy + Math.sin(a) * R];
+  function randomBody() { const bs = bodies(); return bs.length ? bs[(Math.random() * bs.length) | 0] : { x: G.cx, y: G.cy }; }
+  function spawnRingPos() {   // just off-screen around one of the fighters
+    const a = rand(0, TAU), R = Math.hypot(VW, VH) / 2 + 16, c = online() ? randomBody() : { x: G.cx, y: G.cy };
+    return [c.x + Math.cos(a) * R, c.y + Math.sin(a) * R];
   }
   function spawning(dt) {
     if (G.peaceT > 0) { G.peaceT -= dt; return; }
@@ -1058,7 +1338,8 @@
     if (!G.encircled && G.sagaT > 50) {
       G.encircled = true;
       const n = 22 + G.sagaIdx * 3, R = Math.min(VW, VH) / 2 + 10;
-      for (let i = 0; i < n; i++) { const a = i / n * TAU; spawnGrunt(G.cx + Math.cos(a) * R, G.cy + Math.sin(a) * R); }
+      const c = online() ? randomBody() : { x: G.cx, y: G.cy };
+      for (let i = 0; i < n; i++) { const a = i / n * TAU; spawnGrunt(c.x + Math.cos(a) * R, c.y + Math.sin(a) * R); }
       toast('Surrounded!');
     }
     if (!G.bossSpawned && G.sagaT >= SAGA_TIME) spawnBoss();
@@ -1069,15 +1350,15 @@
     const [x, y] = spawnRingPos();
     const hp = 350 * Math.pow(2, i) * teamMul(0.6);
     const b = { x, y, s: B.s, boss: true, name: B.name + (loopN() ? ' +' + loopN() : ''), color: B.color, moves: B.moves, hp, maxHp: hp,
-      spd: (34 + 2 * Math.min(i, 10)), dmg: 14 * sc.dmg, r: 6 * B.scale, scale: B.scale, xp: 40 * sc.xp, kvx: 0, kvy: 0, flash: 0, atkT: 2.5, act: null, ph: 0 };
+      spd: (34 + 2 * Math.min(i, 10)), dmg: 14 * sc.dmg, r: B.r || 6 * B.scale, scale: B.scale, xp: 40 * sc.xp, kvx: 0, kvy: 0, flash: 0, atkT: 2.5, act: null, ph: 0 };
     G.enemies.push(b); G.boss = b;
-    showBanner(B.name.toUpperCase(), 'has entered the fight', B.color);
-    sfx('boss');
+    bossIntro(B, b.name);
   }
   function bossDefeated(b) {
     grantBond();
+    dropTickets(b.x, b.y, 1);
     G.boss = null;
-    G.pickups.push({ x: b.x, y: b.y, kind: 'dragonball', t: 0 });
+    G.pickups.push({ x: b.x, y: b.y, kind: 'loot', t: 0, prog: 0, boss: true });
     for (let i = 0; i < 10; i++) dropOrb(b.x + rand(-20, 20), b.y + rand(-20, 20), b.xp / 10);
     G.flash = 0.7; G.flashCol = '#fff'; G.shake = 10;
     showBanner(b.name.toUpperCase() + ' DEFEATED', saga().name + ' complete', '#ffd83a');
@@ -1170,14 +1451,18 @@
       e.flash -= dt; e.ph += dt;
       const tgt = nearestBody(e.x, e.y);
       if (!tgt) break;   // everyone went down mid-loop
+      if (e.stunT > 0) {   // stunned: drifts with knockback only, no attacks
+        e.stunT -= dt; e.x += e.kvx * dt; e.y += e.kvy * dt; e.kvx *= 0.85; e.kvy *= 0.85;
+        continue;
+      }
       if (e.boss) bossMove(e, dt, tgt);
       else {
         const dx = tgt.x - e.x, dy = tgt.y - e.y, d = Math.hypot(dx, dy) || 1;
         const slow = ringers.some(p => d2(p.x, p.y, e.x, e.y) < 60 * 60) ? 0.65 : 1;
         e.x += dx / d * e.spd * slow * dt; e.y += dy / d * e.spd * slow * dt;
         if (e.shoots) { e.st -= dt; if (e.st <= 0 && d < 170) { e.st = rand(2.8, 4.2); eshot(e.x, e.y, Math.atan2(dy, dx), 80, 2, e.dmg * 0.9, '#ff6a5a'); } }
-        const cdx = G.cx - e.x, cdy = G.cy - e.y;
-        if (Math.hypot(cdx, cdy) > far) { e.x = G.cx + cdx * 0.9; e.y = G.cy + cdy * 0.9; }
+        const cdx = tgt.x - e.x, cdy = tgt.y - e.y;   // stragglers wrap around to the nearest fighter
+        if (Math.hypot(cdx, cdy) > far) { e.x = tgt.x + cdx * 0.9; e.y = tgt.y + cdy * 0.9; }
       }
       e.x += e.kvx * dt; e.y += e.kvy * dt;
       const decay = Math.max(0, 1 - dt * 7); e.kvx *= decay; e.kvy *= decay;
@@ -1209,13 +1494,16 @@
     for (const s of G.shots) {
       s.x += s.vx * dt; s.y += s.vy * dt; s.life -= dt;
       if (s.trail) { s.trail.unshift([s.x, s.y]); if (s.trail.length > 16) s.trail.pop(); }
+      const ms = marks(); G.killer = s.own;
       query(s.x, s.y, s.r, e => {
         if (s.hit.has(e)) return;
         s.hit.add(e);
         const d = Math.hypot(s.vx, s.vy) || 1;
         hurt(e, s.dmg, s.vx / d * 70, s.vy / d * 70, s.col);
+        if (G.fx.length < 140) G.fx.push({ type: 'spark', x: e.x + rand(-3, 3), y: e.y - 4 + rand(-3, 3), life: 0.2, max: 0.2, col: s.col });
         if (--s.pierce <= 0) { s.life = 0; return false; }
       });
+      tagSince(ms, s.own);
       if (s.style !== 'laser' && s.style !== 'dragon' && s.life <= 0) burst(s.x, s.y, s.col, 3, 30, 0.25);
     }
     G.shots = G.shots.filter(s => s.life > 0);
@@ -1226,20 +1514,22 @@
       b.life -= dt; b.grow = Math.min(1, b.grow + dt * 7); b.tt -= dt;
       if (b.tt <= 0) {
         b.tt = b.tick;
-        const ca = Math.cos(b.ang), sa = Math.sin(b.ang), L = b.len * b.grow, ox = p.x, oy = p.y - 3;
+        const mb = marks(); G.killer = b.own;
+        const ca = Math.cos(b.ang), sa = Math.sin(b.ang), L = b.len * b.grow, ox = p.x + ca * HAND, oy = p.y - 3 + sa * HAND;
         for (const e of G.enemies) {
           if (e.dead) continue;
           const t = (e.x - ox) * ca + (e.y - oy) * sa;
           if (t < 0 || t > L) continue;
           if (Math.abs(-(e.x - ox) * sa + (e.y - oy) * ca) < b.width / 2 + e.r) hurt(e, b.dmg, ca * 25, sa * 25, b.col);
         }
+        tagSince(mb, b.own);
       }
     }
     G.beams = G.beams.filter(b => b.life > 0);
 
     for (const b of G.bombs) {
       if (b.charge > 0) {
-        b.charge -= dt; b.x = b.src.x; b.y = b.src.y - 14 - b.size;
+        b.charge -= dt; b.x = b.src.x; b.y = b.src.y - 22 - b.size;
         if (Math.random() < 0.8) { const a = rand(0, TAU), R = rand(30, 60); G.parts.push({ x: b.x + Math.cos(a) * R, y: b.y + Math.sin(a) * R, vx: -Math.cos(a) * R * 2, vy: -Math.sin(a) * R * 2, life: 0.45, max: 0.45, col: b.col, sz: 1, g: 0 }); }
         if (b.target && !b.target.dead) { b.tx = b.target.x; b.ty = b.target.y; }
         continue;
@@ -1250,18 +1540,19 @@
       b.x += dx / d * b.speed * dt; b.y += dy / d * b.speed * dt;
       let hit = d < b.speed * dt + 2 || b.life <= 0;
       if (!hit) query(b.x, b.y, b.size, () => { hit = true; return false; });
-      if (hit) { explode(b.x, b.y, b.radius, b.dmg, b.col, b.core); b.done = true; }
+      if (hit) { const me = marks(); G.killer = b.own; explode(b.x, b.y, b.radius, b.dmg, b.col, b.core); tagSince(me, b.own); b.done = true; }
     }
     G.bombs = G.bombs.filter(b => !b.done);
 
     for (const h of G.hz) {
       if (h.wait > 0) { h.wait -= dt; h.x += rand(-0.5, 0.5); h.y += rand(-0.5, 0.5); continue; }
       const dx = h.cx - h.x, dy = h.cy - h.y, d = Math.hypot(dx, dy);
-      if (d < 5) { explode(h.cx + rand(-4, 4), h.cy + rand(-4, 4), h.r, h.dmg, h.col, h.core); h.done = true; continue; }
+      if (d < 5) { const mh = marks(); G.killer = h.own; explode(h.cx + rand(-4, 4), h.cy + rand(-4, 4), h.r, h.dmg, h.col, h.core); tagSince(mh, h.own); h.done = true; continue; }
       h.x += dx / d * Math.min(d, 320 * dt); h.y += dy / d * Math.min(d, 320 * dt);
     }
     G.hz = G.hz.filter(h => !h.done);
 
+    G.killer = undefined;
     const bs = bodies();
     for (const s of G.eshots) {
       if (s.homing && bs.length) {
@@ -1302,12 +1593,18 @@
     G.orbs = G.orbs.filter(o => !o.got);
     if (G.orbs.length > 380) {   // fold distant orbs into one so the list stays small
       let pool = 0; const keep = [];
-      for (const o of G.orbs) { if (!o.mag && d2(o.x, o.y, G.cx, G.cy) > 200 * 200) pool += o.v; else keep.push(o); }
+      const bs = bodies();
+      for (const o of G.orbs) { if (!o.mag && bs.every(b => d2(o.x, o.y, b.x, b.y) > 200 * 200)) pool += o.v; else keep.push(o); }
       G.orbs = keep; if (pool) { const [x, y] = spawnRingPos(); dropOrb(x, y, pool); }
     }
     for (const k of G.pickups) {
       k.t += dt;
       const p = nearestBody(k.x, k.y); if (!p) break;
+      if (k.kind === 'loot') {   // stand next to a capsule to pop it open
+        k.prog = d2(k.x, k.y, p.x, p.y) < LOOT_R * LOOT_R ? k.prog + dt : Math.max(0, k.prog - dt * 0.5);
+        if (k.prog >= LOOT_OPEN) openLoot(k);
+        continue;
+      }
       const dd = d2(k.x, k.y, p.x, p.y), R = k.kind === 'dragonball' ? 40 : 16;
       if (dd < R * R) {
         const d = Math.sqrt(dd) || 1; k.x += (p.x - k.x) / d * 160 * dt; k.y += (p.y - k.y) / d * 160 * dt;
@@ -1323,6 +1620,7 @@
       for (const q of G.players) if (q.down) revivePlayer(q, 0.5);
       text(p.x, p.y - 14, 'SENZU', '#8ae87a', true); burst(p.x, p.y, '#8ae87a', 14, 50);
     } else if (k.kind === 'cap') openCapsule(k, p);
+    else if (k.kind === 'ticket') { addTickets(1); netEvent(['tk', 1]); burst(p.x, p.y, '#f2c43a', 10, 40); }
     else if (k.kind === 'dragonball') {
       G.dragonBalls++;
       if (G.dragonBalls >= 7) startWish();
@@ -1430,6 +1728,10 @@
   function nextForm(p) { return p.C.forms[p.form + 1]; }
   function startTransform(p) {
     state = 'transform'; G.tf = { t: 0, dur: 1.9, done: false, form: nextForm(p), p };
+    if (p.charId === 'goku' && p.form === 0 && !G.ssjClip) {   // the first Super Saiyan gets the anime clip
+      G.ssjClip = true; Object.assign(G.tf, { clip: true, dur: CLIP_TIME, at: CLIP_FLIP });
+      playClip(); netEvent(['clip']);
+    }
     sfx('transform');
   }
   function updateTransform(dt) {
@@ -1437,7 +1739,7 @@
     const col = tf.form.aura || '#fff';
     for (let i = 0; i < 4; i++) { const a = rand(0, TAU), R = rand(10, 40) * (1 - tf.t / tf.dur) + 6; G.parts.push({ x: p.x + Math.cos(a) * R, y: p.y + Math.sin(a) * R, vx: -Math.cos(a) * 40, vy: -Math.sin(a) * 40 - 30, life: 0.4, max: 0.4, col: Math.random() < 0.5 ? col : '#fff', sz: 1, g: 0 }); }
     G.shake = Math.max(G.shake, tf.t * 2);
-    if (!tf.done && tf.t > tf.dur * 0.55) {
+    if (!tf.done && tf.t > (tf.at || tf.dur * 0.55)) {
       tf.done = true; p.form++; recalc(p); p.hp = Math.min(p.ps.maxHp, p.hp + p.ps.maxHp * 0.3);
       G.flash = 1; G.flashCol = col; G.shake = 10;
       showBanner(tf.form.name.toUpperCase(), (coop() ? pName(p) + ' · ' : '') + 'Power ×' + tf.form.power, col);
@@ -1446,11 +1748,15 @@
       G.enemies = G.enemies.filter(e => !e.dead);
       if (fusePair() && fuseStatus() === 'ready' && G.fuseCD <= 0 && !G.fuseHinted) { G.fuseHinted = true; toast('Fusion unlocked: both press your fuse key (E / Enter)'); }
     }
-    if (tf.t >= tf.dur) { state = 'play'; G.tf = null; }
+    if (tf.t >= tf.dur) { state = 'play'; G.tf = null; hideClip(); }
   }
 
   // ------------------------------------------------------------ update
   function updateCamera() {
+    if (online()) {   // online: the host's screen follows the host; guests follow themselves on their side
+      const me = G.players[0], b = me && (me.absorbed && G.fusion ? G.fusion.ctrl : me);
+      if (b && !b.down) { G.cx = b.x; G.cy = b.y; return; }
+    }
     const bs = bodies(); if (!bs.length) return;
     G.cx = bs.reduce((a, p) => a + p.x, 0) / bs.length;
     G.cy = bs.reduce((a, p) => a + p.y, 0) / bs.length;
@@ -1476,7 +1782,8 @@
       p.x += (mx * sp + p.kvx) * dt; p.y += (my * sp + p.kvy) * dt;
       for (const k in p.buffs) if (p.buffs[k] > 0) p.buffs[k] -= dt;
       if (p.itemCD > 0) p.itemCD -= dt;
-      updateItem(p, dt);
+      if (p.ultLock > 0) p.ultLock -= dt;
+      const mi = marks(); G.killer = p.idx; updateItem(p, dt); G.killer = undefined; tagSince(mi, p.idx);
       const dec = Math.max(0, 1 - dt * 6); p.kvx *= dec; p.kvy *= dec;
       p.anim += dt;
       p.iframe -= dt; p.hurtT -= dt;
@@ -1493,15 +1800,24 @@
       if (p.reviveT >= REVIVE_TIME) revivePlayer(p, 0.4);
     }
     updateCamera();
+    if (online() && !G.arena) for (const b of bodies()) {   // build terrain (and its collisions) around every fighter
+      const bx = Math.floor(b.x / CHUNK), by = Math.floor(b.y / CHUNK);
+      for (let i = -1; i <= 1; i++) for (let j = -1; j <= 1; j++) getChunk(bx + i, by + j, saga().biome);
+    }
 
     spawning(dt);
+    if (!G.arena && (G.lootT -= dt) <= 0) { G.lootT = rand(70, 100); spawnSupplyDrop(); }
     buildGrid();
     updateEnemies(dt);
     buildGrid();
     for (const p of bodies()) {
+      const m = marks(); G.killer = p.idx;
       updateTechs(p, p, dt);
       if (p.fusion) updateTechs(p, p.fusion.other, dt);
+      tagSince(m, p.idx);
     }
+    G.killer = undefined;
+    updateUlts(dt);
     updateShots(dt);
     G.enemies = G.enemies.filter(e => !e.dead);
     updatePickups(dt);
@@ -1522,7 +1838,8 @@
     if (tp) startTransform(tp);
     else if (G.picks.length) openLevelUp();
   }
-  function leash() {   // keep co-op players on one screen
+  function leash() {   // keep couch co-op players on one screen
+    if (online()) return;
     const bs = bodies(); if (bs.length < 2) return;
     for (const [k, lim] of [['x', VW - 40], ['y', VH - 40]]) {
       const lo = Math.min(...bs.map(p => p[k])), hi = Math.max(...bs.map(p => p[k])), span = hi - lo;
@@ -1548,6 +1865,81 @@
     G.shake = Math.max(0, G.shake - dt * 20);
     if (G.wishFade > 0 && state !== 'wish') G.wishFade -= dt;
     G.flash = Math.max(0, G.flash - dt * 1.6);
+  }
+
+  // ------------------------------------------------------------ attack effect sprites
+  // From the Supersonic Warriors effects sheet (tools/make_fx.py). Each attack picks the sprite family
+  // closest to its colour: y (yellow/orange), g (green), b (blue), p (pink/purple/red).
+  const FX_NAMES = (() => {
+    const n = ['fx/disc', 'fx/sphere_y', 'fx/sphere_p', 'fx/sphere_g', 'fx/sphere_b', 'fx/ghost', 'fx/boom_s', 'fx/boom'];
+    for (const f of ['y', 'g', 'b', 'p']) {
+      n.push('fx/spark_' + f, 'fx/orb_' + f, 'fx/comet_' + f);
+      for (const k of ['start', 'body0', 'body1', 'end']) n.push('fx/beam_' + f + '_' + k, 'fx/drill_' + f + '_' + k);
+    }
+    return n;
+  })();
+  const famCache = {};
+  function fam(col) {
+    if (famCache[col]) return famCache[col];
+    const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})/i.exec(col || '');
+    let f = 'y';
+    if (m) {
+      const [r, g, b] = [m[1], m[2], m[3]].map(h => parseInt(h, 16) / 255), mx = Math.max(r, g, b), mn = Math.min(r, g, b), d = mx - mn;
+      if (d / (mx || 1) > 0.25) {
+        let h = mx === r ? ((g - b) / d) % 6 : mx === g ? (b - r) / d + 2 : (r - g) / d + 4;
+        h = (h * 60 + 360) % 360;
+        f = h < 15 || h >= 260 ? 'p' : h < 75 ? 'y' : h < 165 ? 'g' : 'b';
+      } else if (b > r + 0.05) f = 'b';
+    }
+    return (famCache[col] = f);
+  }
+  // Draws frame `frame` of an art/fx sprite centred on (x, y), `size` world units wide, turned by `ang`.
+  function fxImg(name, frame, x, y, size, ang = 0, alpha = 1) {
+    const a = ART[name]; if (!a) return false;
+    const h = size * a.fh / a.fw;
+    ctx.save(); ctx.globalAlpha = alpha; ctx.translate(x, y); if (ang) ctx.rotate(ang);
+    ctx.drawImage(a.img, (frame % a.frames) * a.fw, 0, a.fw, a.fh, -size / 2, -h / 2, size, h);
+    ctx.restore();
+    return true;
+  }
+  const spin = (rate, n) => Math.floor(G.t * rate) % n;
+  function drawShot(s) {
+    const f = fam(s.col);
+    if (s.r >= 4.5) fxImg('fx/comet_' + f, 0, s.x, s.y, s.r * 5.2, Math.atan2(s.vy, s.vx) - Math.PI / 2);   // comets fall "down" on the sheet
+    else if (!fxImg('fx/orb_' + f, spin(12, 2), s.x, s.y, s.r * 5)) kiBall(s.x, s.y, s.r, s.col, s.core);
+  }
+  function drawEnemyShot(s) {
+    const f = fam(s.col);
+    if (s.big) fxImg('fx/comet_' + f, 0, s.x, s.y, s.r * 5.2, Math.atan2(s.vy, s.vx) - Math.PI / 2);
+    else if (!fxImg('fx/orb_' + f, spin(12, 2), s.x, s.y, s.r * 5.5)) { circ(s.x, s.y, s.r + 1, '#1a1020'); circ(s.x, s.y, s.r, s.col); }
+  }
+  function drawBomb(b) {
+    const grow = b.chargeMax > 0 ? clamp(1 - b.charge / b.chargeMax, 0.15, 1) : 1, f = fam(b.col);
+    const name = 'fx/sphere_' + f, a = ART[name];
+    if (!a || !fxImg(name, spin(10, a.frames), b.x, b.y, b.size * grow * 2.3)) kiBall(b.x, b.y, b.size * grow, b.col, b.core);
+  }
+  function drawHz(h) {
+    if (h.ghost) fxImg('fx/ghost', spin(10, 5), h.x, h.y, 18);
+    else fxImg('fx/orb_' + fam(h.col), spin(12, 2), h.x, h.y, 13) || kiBall(h.x, h.y, 3, h.col, h.core);
+  }
+  function drawBoom(x, k) {   // k runs 1 -> 0 over the explosion
+    const big = x.r >= 18, name = big ? 'fx/boom' : 'fx/boom_s';
+    if (!fxImg(name, Math.min(5, Math.floor((1 - k) * 6)), x.x, x.y, x.r * (big ? 2.4 : 3.2))) {
+      ctx.globalAlpha = k; circ(x.x, x.y, x.r * (1.1 - k * 0.5), x.col); circ(x.x, x.y, x.r * (0.8 - k * 0.4), x.core || '#fff'); ctx.globalAlpha = 1;
+    }
+  }
+  function drawSpark(x, k) { return fxImg('fx/spark_' + fam(x.col), Math.min(3, Math.floor((1 - k) * 4)), x.x, x.y, 20); }
+  // Beam from sprites: a start burst at the hands, the body stretched to length, and the head at the far end.
+  function beamSprites(kind, f, L, w) {
+    const body = ART['fx/' + kind + '_' + f + '_body' + spin(20, 2)], st = ART['fx/' + kind + '_' + f + '_start'], en = ART['fx/' + kind + '_' + f + '_end'];
+    if (!body || !st || !en) return false;
+    const H = kind === 'drill' ? w * 2.2 + 4 : w * 1.35;
+    ctx.drawImage(body.img, 0, -H / 2, L, H);
+    const sh = kind === 'drill' ? H * 1.6 : w * 2, sw = st.fw / st.fh * sh;
+    ctx.drawImage(st.img, -sw * 0.35, -sh / 2, sw, sh);
+    const eh = kind === 'drill' ? H * 1.8 : w * 2.3, ew = en.fw / en.fh * eh;
+    ctx.drawImage(en.img, L - ew * 0.45, -eh / 2, ew, eh);
+    return true;
   }
 
   // ------------------------------------------------------------ render
@@ -1576,8 +1968,10 @@
     // pickups
     for (const o of G.orbs) sprite(orbSprite(o.v), o.x, o.y);
     for (const k of G.pickups) {
+      if (k.kind === 'loot') { drawLoot(k); continue; }
       const bob = Math.round(Math.sin(k.t * 4) * 1.5);
       if (k.kind === 'dragonball') { ctx.globalAlpha = 0.35 + 0.2 * Math.sin(k.t * 6); circ(k.x, k.y + bob, 9, '#ffb030'); ctx.globalAlpha = 1; }
+      if (k.kind === 'ticket') { ctx.globalAlpha = 0.3 + 0.2 * Math.sin(k.t * 7); circ(k.x, k.y + bob, 7, '#f2c43a'); ctx.globalAlpha = 1; }
       if (k.kind === 'cap') { ctx.globalAlpha = 0.25 + 0.15 * Math.sin(k.t * 5); circ(k.x, k.y + bob, k.cap === 'item' ? 9 : 6, CAPSULES[k.cap].color); ctx.globalAlpha = 1; }
       sprite(k.kind === 'cap' ? CAPSULES[k.cap].sprite : k.kind, k.x, k.y + bob);
     }
@@ -1611,45 +2005,49 @@
         const fr = e.act ? Math.floor(e.ph * 6) % 4 : 4 + Math.floor(e.ph * 10) % 4;
         sprite(e.s, e.x, e.y + 8 * sc - spriteHeight(e.s, sc) / 2, sc, e.flash, alpha, fr, e.face < 0);
       } else sprite(e.s, e.x, e.y + bob, sc, e.flash, alpha);
+      if (e.stunT > 0) for (let k = 0; k < 3; k++) {   // dizzy stars
+        const a = G.t * 6 + k * TAU / 3;
+        ctx.fillStyle = '#ffe24a'; ctx.fillRect(Math.round(e.x + Math.cos(a) * 6), Math.round(e.y - 12 * sc + Math.sin(a) * 2), 2, 2);
+      }
     }
 
     // clones
     for (const p of bodies()) {
-      if (!hasTech(p, 'multiform')) continue;
+      if (!hasTech(p, 'multiform') || (online() && p.idx !== viewIdx())) continue;
       const inst = techOf(p, 'multiform'), n = TECHS.multiform.stats(inst.lv).count, f = curForm(p);
       for (let i = 0; i < n; i++) { const [x, y] = clonePos(p, inst, i, n); sprite(f.sprite, x, y, 0.85 * (f.scale || 1), 0, 0.55); }
     }
 
-    for (const b of G.beams) drawBeam(b);
+    for (const b of G.beams) if (seen(b)) drawBeam(b);
     for (const s of G.shots) {
+      if (!seen(s)) continue;
       if (s.style === 'laser') { const d = Math.hypot(s.vx, s.vy); line(s.x - s.vx / d * 8, s.y - s.vy / d * 8, s.x, s.y, s.col, 2); line(s.x - s.vx / d * 6, s.y - s.vy / d * 6, s.x, s.y, s.core, 1); }
       else if (s.style === 'dragon') drawDragon(s);
-      else kiBall(s.x, s.y, s.r, s.col, s.core);
+      else if (s.style === 'disc') fxImg('fx/disc', spin(16, 4), s.x, s.y, s.r * 3);
+      else drawShot(s);
     }
-    for (const b of G.bombs) {
-      const grow = b.chargeMax > 0 ? clamp(1 - b.charge / b.chargeMax, 0.15, 1) : 1;
-      kiBall(b.x, b.y, b.size * grow, b.col, b.core);
-    }
-    for (const h of G.hz) kiBall(h.x, h.y, 3, h.col, h.core);
-    for (const s of G.eshots) {
-      if (s.big) { ctx.globalAlpha = 0.4; circ(s.x, s.y, s.r * 1.5, s.col); ctx.globalAlpha = 1; circ(s.x, s.y, s.r, s.col); circ(s.x - 2, s.y - 2, s.r * 0.4, '#fff'); }
-      else { circ(s.x, s.y, s.r + 1, '#1a1020'); circ(s.x, s.y, s.r, s.col); }
-    }
+    for (const b of G.bombs) if (seen(b)) drawBomb(b);
+    for (const h of G.hz) if (seen(h)) drawHz(h);
+    for (const s of G.eshots) drawEnemyShot(s);
     for (const x of G.fx) {
+      if (!seen(x)) continue;
       const k = x.life / x.max;
-      if (x.type === 'boom') { ctx.globalAlpha = k; circ(x.x, x.y, x.r * (1.1 - k * 0.5), x.col); circ(x.x, x.y, x.r * (0.8 - k * 0.4), x.core || '#fff'); ctx.globalAlpha = 1; }
+      if (x.type === 'boom') drawBoom(x, k);
+      else if (x.type === 'spark') drawSpark(x, k);
       else if (x.type === 'ring') { ctx.globalAlpha = k; ctx.strokeStyle = x.col; ctx.lineWidth = 3 * k + 1; ctx.beginPath(); ctx.arc(x.x, x.y, x.r * (1 - k * 0.85), 0, TAU); ctx.stroke(); ctx.globalAlpha = 1; }
       else if (x.type === 'dash') { ctx.globalAlpha = k; line(x.x, x.y, x.x2, x.y2, x.col, 2); ctx.globalAlpha = 1; }
+      else if (x.type === 'impact' && drawSpark(x, k)) { /* sprite spark */ }
       else if (x.type === 'impact') { const r = 8 * (1 - k) + 3; ctx.globalAlpha = k; line(x.x - r, x.y, x.x + r, x.y, x.col, 2); line(x.x, x.y - r, x.x, x.y + r, x.col, 2); line(x.x - r * 0.6, x.y - r * 0.6, x.x + r * 0.6, x.y + r * 0.6, '#fff', 1); ctx.globalAlpha = 1; }
       else if (x.type === 'erase') { ctx.globalAlpha = k; circ(x.x, x.y, 10 * (1 - k) + 2, x.col); ctx.globalAlpha = 1; }
     }
     for (const q of G.parts) { ctx.globalAlpha = Math.min(1, q.life / q.max * 1.5); ctx.fillStyle = q.col; ctx.fillRect(Math.round(q.x), Math.round(q.y), q.sz, q.sz); }
     ctx.globalAlpha = 1;
+    for (const p of bodies()) drawPlayer(p, true);
     // player tags in co-op
     if (coop()) {
       ctx.textAlign = 'center'; ctx.font = '4px "Press Start 2P", monospace';
       for (const p of bodies()) {
-        const h = spriteHeight(curForm(p).sprite, curForm(p).scale || 1);
+        const h = Math.min(spriteHeight(curForm(p).sprite, curForm(p).scale || 1), 36 * (curForm(p).scale || 1));   // glide frames widen the cell
         const label = p.fusion ? 'P' + (p.fusion.ctrl.idx + 1) + '+P' + (p.fusion.other.idx + 1) : 'P' + (p.idx + 1);
         ctx.fillStyle = '#1a1020'; ctx.fillText(label, p.x + 0.5, p.y + 8 - h - 1.5);
         ctx.fillStyle = p.fusion ? '#ffd83a' : P_COLORS[p.idx]; ctx.fillText(label, p.x, p.y + 8 - h - 2);
@@ -1658,6 +2056,7 @@
     // texts
     ctx.textAlign = 'center'; ctx.lineJoin = 'round';
     for (const t of G.texts) {
+      if (!seen(t)) continue;
       ctx.globalAlpha = Math.min(1, t.life / t.max * 2);
       ctx.font = '8px "Press Start 2P", monospace';
       ctx.strokeStyle = '#1a1020'; ctx.lineWidth = 2; ctx.strokeText(t.s, Math.round(t.x), Math.round(t.y));
@@ -1667,8 +2066,6 @@
     drawIndicators();
     if (state === 'wish' || (G.wishFade > 0)) drawShenron();
     ctx.setTransform(FINE, 0, 0, FINE, 0, 0);
-    const hurtT = Math.max(...G.players.map(p => p.hurtT));
-    if (hurtT > 0) { ctx.fillStyle = 'rgba(255,40,40,' + hurtT + ')'; ctx.fillRect(0, 0, VW, VH); }
     if (G.flash > 0) { ctx.globalAlpha = Math.min(1, G.flash); ctx.fillStyle = G.flashCol; ctx.fillRect(0, 0, VW, VH); ctx.globalAlpha = 1; }
     flush();
   }
@@ -1691,10 +2088,18 @@
     if (a.frames >= 6) return p.moving ? 2 + Math.floor(p.anim * 8) % 4 : Math.floor(p.anim * 2.5) % 2;
     return (p.moving ? 2 : 0) + Math.floor(p.anim * (p.moving ? 6 : 2.5)) % 2;
   }
-  function drawPlayer(p) {
+  function drawPlayer(p, top) {
     const f = curForm(p), sc = f.scale || 1, name = f.sprite, a = ART[name];
+    if (top) {   // second pass above effects: sprite only
+      const h = spriteHeight(name, sc), animated = a && a.frames > 1;
+      const bob = !animated ? (p.moving && Math.sin(p.anim * 14) > 0 ? -1 : 0) : p.moving ? Math.round(Math.sin(p.anim * 7) * 1.5) - 2 : 0;   // gliding fighters hover
+      const flip = !!(a && (a.frames === 4 || a.frames === 8) && p.face < 0);
+      const blink = p.iframe > 0 && Math.floor(G.t * 20) % 2 ? 0.45 : 1;
+      sprite(name, p.x, p.y + 8 * sc - h / 2 + bob, sc, p.hurtT > 0 ? 0.08 : 0, blink, animFrame(name, p), flip);
+      return;
+    }
     if (f.aura) { ctx.globalAlpha = 0.22 + 0.08 * Math.sin(G.t * 20); circ(p.x, p.y + 1, (p.fusion ? 15 : 11) * sc, f.aura); ctx.globalAlpha = 1; }
-    if (hasTech(p, 'kaioken')) {
+    if (hasTech(p, 'kaioken') && (!online() || p.idx === viewIdx())) {
       const r = TECHS.kaioken.stats(techOf(p, 'kaioken').lv).radius * p.ps.area;
       ctx.globalAlpha = 0.18 + 0.06 * Math.sin(G.t * 14); ctx.strokeStyle = '#ff3030'; ctx.lineWidth = 1;
       ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, TAU); ctx.stroke(); ctx.globalAlpha = 1;
@@ -1706,10 +2111,16 @@
       ctx.stroke();
     }
     ctx.fillStyle = 'rgba(0,0,0,0.3)'; ctx.fillRect(Math.round(p.x - 5 * sc), Math.round(p.y + 7 * sc), Math.round(10 * sc), 2);
+    if (aimOn(p) && (!online() || p.idx === viewIdx())) {   // the shooter's aim inside a fusion
+      const a = Math.atan2(p.fusion.aim[1], p.fusion.aim[0]), c = Math.cos(a), sn = Math.sin(a), R = 22;
+      ctx.globalAlpha = 0.75; ctx.fillStyle = P_COLORS[p.idx];
+      ctx.beginPath(); ctx.moveTo(p.x + c * (R + 5), p.y + sn * (R + 5)); ctx.lineTo(p.x + c * R - sn * 3, p.y + sn * R + c * 3); ctx.lineTo(p.x + c * R + sn * 3, p.y + sn * R - c * 3); ctx.closePath(); ctx.fill();
+      ctx.globalAlpha = 1;
+    }
     const blink = p.iframe > 0 && Math.floor(G.t * 20) % 2 ? 0.45 : 1;
     const h = spriteHeight(name, sc);
     const animated = a && a.frames > 1;
-    const bob = !animated && p.moving && Math.sin(p.anim * 14) > 0 ? -1 : 0;
+    const bob = !animated ? (p.moving && Math.sin(p.anim * 14) > 0 ? -1 : 0) : p.moving ? Math.round(Math.sin(p.anim * 7) * 1.5) - 2 : 0;   // gliding fighters hover
     const flip = !!(a && (a.frames === 4 || a.frames === 8) && p.face < 0);   // fusion and fighter strips face right
     if (hasItem(p, 'nimbus')) { ctx.globalAlpha = 0.9; circ(p.x - 4, p.y + 8, 4, '#f2c43a'); circ(p.x + 3, p.y + 8, 5, '#fff27a'); circ(p.x, p.y + 6, 4, '#fff8b0'); ctx.globalAlpha = 1; }
     if (hasItem(p, 'ring')) { ctx.globalAlpha = 0.16; ctx.strokeStyle = '#f2c43a'; ctx.lineWidth = 1; ctx.beginPath(); ctx.arc(p.x, p.y, 60, 0, TAU); ctx.stroke(); ctx.globalAlpha = 1; }
@@ -1730,12 +2141,16 @@
   function drawBeam(b) {
     const p = b.src;
     const fade = Math.min(1, b.life / 0.15), w = b.width * fade * (0.9 + 0.15 * Math.sin(G.t * 50));
-    const L = b.len * b.grow, ox = p.x, oy = p.y - 3;
+    const L = b.len * b.grow, ox = p.x + Math.cos(b.ang) * HAND, oy = p.y - 3 + Math.sin(b.ang) * HAND;
     ctx.save(); ctx.translate(ox, oy); ctx.rotate(b.ang);
     if (b.style === 'pole') {
       ctx.fillStyle = '#8a1a12'; ctx.fillRect(0, -2, L, 4);
       ctx.fillStyle = b.col; ctx.fillRect(0, -1.5, L, 2);
       ctx.fillStyle = b.core; ctx.fillRect(L - 4, -2.5, 4, 5); ctx.fillRect(0, -2.5, 3, 5);
+    } else if (b.style === 'drill' && beamSprites('drill', fam(b.col), L, w)) {
+      /* sprite drill beam */
+    } else if (b.style !== 'drill' && beamSprites('beam', fam(b.col), L, w)) {
+      /* sprite beam */
     } else if (b.style === 'drill') {
       ctx.fillStyle = b.col; ctx.fillRect(0, -w / 2, L, w);
       ctx.fillStyle = b.core; ctx.fillRect(0, -w / 4, L, Math.max(1, w / 2));
@@ -1918,24 +2333,15 @@
       const ang = i / 7 * TAU + t * 0.6, bx = cx + Math.cos(ang) * 24, by = cy + Math.sin(ang) * 8;
       ctx.globalAlpha = 0.45 * a; circ(bx, by, 6, '#ffb030'); sprite('dragonball', bx, by, 1, 0, a);
     }
-    const rise = Math.min(1, t / 1.6), N = 36, pts = [];
-    for (let i = 0; i < N; i++) {
-      const s = i / (N - 1);
-      pts.push([cx + Math.sin(s * 7 + t * 1.4) * 34 * (1 - s * 0.45), cy - 12 - s * VH * 0.62 * rise]);
-    }
-    for (let i = 0; i < N; i++) {
-      const [x, y] = pts[i], r = 2.5 + 4.5 * Math.sin(Math.PI * Math.min(1, (i + 5) / N));
+    const rise = Math.min(1, t / 1.8), ease = 1 - Math.pow(1 - rise, 3);
+    const sh = ART.shenron, sc = Math.min(0.62, (VH * 0.6) / 386);
+    if (sh) {
       ctx.globalAlpha = a;
-      circ(x, y, r + 1, '#0e3a18'); circ(x, y, r, '#2e9a3a'); circ(x - r * 0.3, y - r * 0.3, r * 0.45, '#7ad04a');
-      if (i % 3 === 0) circ(x + r * 0.45, y + r * 0.2, r * 0.32, '#e8d04a');
+      const hx = cx + 40 - (1 - ease) * 60, hy = cy - VH * 0.36 - (1 - ease) * 40 + Math.sin(t * 1.6) * 3;
+      ctx.globalAlpha = 0.25 * a; circ(hx, hy, 386 * sc * 0.45, '#8aff4a');
+      ctx.globalAlpha = a * ease;
+      sprite('shenron', hx, hy, sc);
     }
-    const [hx, hy] = pts[N - 1];
-    ctx.globalAlpha = a;
-    line(hx - 4, hy - 6, hx - 9, hy - 16, '#e8d0a0', 1.5); line(hx + 3, hy - 6, hx + 7, hy - 16, '#e8d0a0', 1.5);
-    circ(hx, hy, 9, '#0e3a18'); circ(hx, hy, 8, '#2e9a3a'); circ(hx + 6, hy + 3, 5, '#2e9a3a'); circ(hx - 2, hy - 2, 3, '#7ad04a');
-    ctx.fillStyle = '#ff2a2a'; ctx.fillRect(hx - 4, hy - 3, 2, 2); ctx.fillRect(hx + 2, hy - 3, 2, 2);
-    const w = Math.sin(t * 3) * 3;
-    line(hx + 9, hy + 4, hx + 24, hy + 10 + w, '#e8d0a0', 0.8); line(hx - 6, hy + 4, hx - 22, hy + 10 - w, '#e8d0a0', 0.8);
     ctx.globalAlpha = 1;
   }
 
@@ -1946,6 +2352,7 @@
       <div class="pcard" id="pc${p.idx}" style="--pc:${P_COLORS[p.idx]}">
         <div class="pc-head">${coop() ? `<b class="pc-tag">P${p.idx + 1}</b>` : ''}<span class="pc-form"></span></div>
         <div class="hpbar"><div class="hpfill"></div><span class="hptext"></span></div>
+        <div class="enbar"><div class="enfill"></div><span class="entext"></span></div>
         <div class="pwr">Power level <b class="pc-pwr">0</b></div>
         <div class="pc-extra"></div>
       </div>`).join('');
@@ -1956,9 +2363,12 @@
       const el = $('pc' + p.idx); if (!el) continue;
       const body = p.absorbed ? G.fusion.ctrl : p;
       el.querySelector('.hpfill').style.width = clamp(body.hp / body.ps.maxHp * 100, 0, 100).toFixed(1) + '%';
+      const en = body.energy || 0;
+      el.querySelector('.enfill').style.width = en.toFixed(1) + '%';
+      el.classList.toggle('ult', en >= ENERGY_MAX && !p.down && !p.absorbed);
     }
     const fs = fuseStatus();
-    const key = [G.players.map(p => [Math.ceil(p.hp), p.form, p.down, p.absorbed, !!p.fusion, p.item, Math.ceil(p.itemCD), Object.values(p.buffs).map(Math.ceil).join('/')].join()).join(';'),
+    const key = [G.players.map(p => [Math.ceil(p.hp), Math.floor(p.energy || 0), p.form, p.down, p.absorbed, !!p.fusion, p.item, Math.ceil(p.itemCD), Object.values(p.buffs).map(Math.ceil).join('/')].join()).join(';'),
       G.arena && Math.ceil(G.arena.t), G.level, Math.floor(G.t), G.kills, G.dragonBalls, G.sagaIdx,
       Math.floor(powerLevel(G.players[0]) / 10), fs, G.fusion && G.fusion.form, G.fuseReq && Math.ceil(G.fuseReq.t), Math.ceil(G.fuseCD), G.fusion && Math.ceil(G.fusion.t)].join('|');
     if (key !== hudKey) {
@@ -1972,6 +2382,8 @@
         formEl.textContent = p.absorbed ? 'Inside ' + FUSIONS[G.fusion.kind].name : f.name;
         formEl.style.setProperty('--c', f.aura || '#c8c4e0');
         el.querySelector('.pc-pwr').textContent = fmt(powerLevel(body));
+        const U = ultOf(body), en = Math.floor(body.energy || 0);
+        el.querySelector('.entext').textContent = p.absorbed ? U.name : en >= ENERGY_MAX ? U.name + ' \u00b7 ' + ultKeyName(p) : U.name + ' ' + en + '%';
         const it = p.item ? ITEMS[p.item] : null;
         el.querySelector('.pc-extra').innerHTML = (it ? `<span class="chip item" title="${esc(it.info)}"><img src="art/${it.sprite}.png" alt="">${esc(it.name)}${p.item === 'senzu' && p.itemCD > 0 ? ' ' + Math.ceil(p.itemCD) : ''}</span>` : '') +
           [['speed', 'SPD', '#3a8ae8'], ['dex', 'DEX', '#3ac85a'], ['power', 'PWR', '#f08a1a']].filter(([k]) => body.buffs[k] > 0)
@@ -1989,7 +2401,7 @@
       fb.hidden = !fs;
       if (fs) {
         let msg = '', cls = '';
-        if (G.fusion) { msg = fusionForm().name + ' · ' + mmss(G.fusion.t) + (G.fusion.form < G.fusion.maxForm ? ' · ' + fuseKeyName(G.fusion.ctrl) + ': power up' : ''); cls = 'on'; }
+        if (G.fusion) { const F = G.fusion, split = !F.other.left && !isBot(F.other); msg = fusionForm().name + ' \u00b7 ' + mmss(F.t) + (split ? ' \u00b7 ' + pName(F.ctrl) + ' aims, ' + pName(F.other) + ' steers' : '') + (F.form < F.maxForm ? ' \u00b7 ' + fuseKeyName(F.ctrl) + ': power up' : ''); cls = 'on'; }
         else if (G.fuseReq) { const o = fusePartner(G.players[G.fuseReq.by]); msg = pName(o) + ': press ' + fuseKeyName(o) + ' to fuse · ' + Math.ceil(G.fuseReq.t); cls = 'req'; }
         else if (fs === 'ready') { msg = G.test ? 'Fusion ready \u00b7 press E' : 'Fusion ready \u00b7 ' + pName(fusePair().goku) + ' ' + fuseKeyName(fusePair().goku) + ' + ' + pName(fusePair().vegeta) + ' ' + fuseKeyName(fusePair().vegeta); cls = 'ready'; }
         else if (fs === 'cooldown') msg = 'Fusion recharging · ' + mmss(G.fuseCD);
@@ -2050,7 +2462,7 @@
     $('over-title').textContent = won ? 'Universe saved' : 'Defeated';
     $('over-sub').textContent = won ? 'Broly is down. Every saga cleared as ' + names + '.' : 'Fell during ' + sagaName() + '.' + (isBest ? ' New personal best.' : '');
     const stats = [['Time', mmss(G.t)], ['Level', G.level], ...G.players.map(p => [coop() ? pName(p) : 'Form', p.C.forms[p.form].name]),
-      ['Sagas cleared', G.sagaIdx + (won ? 1 : 0)], ['Enemies defeated', fmt(G.kills)], ['Damage dealt', short(G.dmgDealt)]];
+      ['Sagas cleared', G.sagaIdx + (won ? 1 : 0)], ['Enemies defeated', fmt(G.kills)], ['Damage dealt', short(G.dmgDealt)], ['Summon tickets', (G.ticketsRun || 0) + ' earned \u00b7 ' + gacha.tickets + ' saved']];
     $('over-stats').innerHTML = stats.map(([k, v]) => `<div><dt>${esc(k)}</dt><dd>${esc(v)}</dd></div>`).join('');
     $('endless').hidden = !won;
     $('over').hidden = false; $('levelup').hidden = true;
@@ -2070,14 +2482,16 @@
     $('pick-label').textContent = mode === 1 ? 'Choose your fighter' : 'Player ' + (chosen.length + 1) + ': choose your fighter';
     $('coop-hint').hidden = mode === 1;
     const box = $('chars'); box.innerHTML = '';
-    Object.entries(CHARS).forEach(([id, C], i) => {
+    updateTicketBadge();
+    const locked = Object.keys(CHARS).filter(id => !ownsChar(id)).length;
+    Object.entries(CHARS).filter(([id]) => ownsChar(id)).forEach(([id, C], i) => {
       const b = document.createElement('button'); b.className = 'char'; b.id = 'char-' + id;
       const rec = best[id];
       const taken = chosen.map((c, k) => c === id ? k : -1).filter(k => k >= 0);
       b.innerHTML = `
         ${taken.length ? `<span class="taken-row">${taken.map(k => `<span class="taken" style="--c:${P_COLORS[k]}">P${k + 1}</span>`).join('')}</span>` : ''}
         <span class="char-art">${portrait(C.forms[C.forms.length - 1].sprite, 'ghost')}${portrait(C.forms[0].sprite)}</span>
-        <span class="char-head"><span class="char-name">${C.name}</span><kbd>${i + 1}</kbd></span>
+        <span class="char-head"><span class="char-name">${C.name}</span>${C.gacha ? `<span class="rar" style="--c:${GACHA.tiers[C.gacha].color}">${C.gacha}</span>` : ''}${i < 9 ? `<kbd>${i + 1}</kbd>` : ''}</span>
         <span class="char-title">${C.title}</span>
         <span class="char-perk">${C.perk}</span>
         <span class="char-start">Starts with <b>${TECHS[C.start].name}</b></span>
@@ -2086,6 +2500,13 @@
       b.onclick = () => pickFighter(id);
       box.appendChild(b);
     });
+    if (locked) {
+      const b = document.createElement('button'); b.className = 'char summon-card';
+      b.innerHTML = `<span class="char-art"><img src="art/cap_item.png" alt=""></span><span class="char-name">${locked} more fighter${locked > 1 ? 's' : ''}</span>
+        <span class="char-perk">Summon them with tickets dropped by enemies and bosses.</span><span class="char-start"><b>Open Summon</b></span>`;
+      b.onclick = () => { audioInit(); openGacha(); };
+      box.appendChild(b);
+    }
   }
   function pickFighter(id) {
     audioInit();
@@ -2103,19 +2524,155 @@
     buildTitle(); $('title').hidden = false;
   }
 
+  // ------------------------------------------------------------ summoning (gacha)
+  // Tickets drop from enemies and bosses and are saved in this browser. 5 tickets buy one summon.
+  const GACHA_KEY = 'zs-gacha';
+  const gacha = { tickets: 0, owned: [] };
+  // Sandbox: #summontest gives 10 tickets, #summontest50 gives 50, and so on. Nothing is saved.
+  const simMatch = /^#summontest(\d{1,4})?$/.exec(location.hash);
+  const SUMMON_SIM = !!simMatch, SIM_TICKETS = simMatch ? Math.max(1, +(simMatch[1] || 10)) : 0;
+  if (SUMMON_SIM) gacha.tickets = SIM_TICKETS;
+  else try { Object.assign(gacha, JSON.parse(localStorage.getItem(GACHA_KEY) || '{}')); } catch (e) { }
+  function saveGacha() { if (SUMMON_SIM) return; try { localStorage.setItem(GACHA_KEY, JSON.stringify(gacha)); } catch (e) { } }
+  const ownsChar = id => !CHARS[id].gacha || gacha.owned.includes(id);
+  const gachaPool = tier => Object.keys(CHARS).filter(id => CHARS[id].gacha === tier);
+  function addTickets(n, quiet) {
+    gacha.tickets += n; saveGacha(); updateTicketBadge();
+    if (G) G.ticketsRun = (G.ticketsRun || 0) + n;
+    if (!quiet) toast('Summon ticket +' + n + ' (' + gacha.tickets + ' saved)');
+  }
+  function dropTickets(x, y, n) { for (let i = 0; i < n; i++) G.pickups.push({ x: x + rand(-14, 14), y: y + rand(-10, 10), kind: 'ticket', t: 0 }); }
+  function updateTicketBadge() {
+    const el = $('summon-btn'); if (el) el.innerHTML = `<img src="art/ticket.png" alt=""> Summon <b>${gacha.tickets}</b>`;
+    const t = $('g-tix'); if (t) t.textContent = gacha.tickets;
+    const one = $('g-pull'), ten = $('g-pull10');
+    if (one) { one.disabled = gacha.tickets < GACHA.cost; one.textContent = 'Summon \u00d71 (' + GACHA.cost + ' ticket)'; }
+    if (ten) { ten.disabled = gacha.tickets < GACHA.cost * GACHA.multi; ten.textContent = 'Summon \u00d7' + GACHA.multi + ' (' + GACHA.cost * GACHA.multi + ' tickets)'; }
+  }
+  function openGacha() {
+    if (state !== 'title') return;
+    $('g-rates').textContent = GACHA.rates.map(([t, r]) => t + ' ' + Math.round(r * 100) + '%').join(' · ');
+    $('g-roster').innerHTML = ['LR', 'SSR', 'SR', 'R'].map(tier => gachaPool(tier).map(id => {
+      const C = CHARS[id], own = gacha.owned.includes(id);
+      return `<div class="g-char ${own ? 'own' : 'locked'}" style="--c:${GACHA.tiers[tier].color}"><span class="rar">${tier}</span>${portrait(C.forms[0].sprite)}<span>${own ? esc(C.name) : '???'}</span></div>`;
+    }).join('')).join('');
+    updateTicketBadge();
+    $('gacha').hidden = false; $('title').hidden = true;
+  }
+  function closeGacha() { $('gacha').hidden = true; if (state === 'title') { buildTitle(); $('title').hidden = false; } }
+  function rollTier() {
+    let r = Math.random();
+    for (const [tier, p] of GACHA.rates) { r -= p; if (r <= 0) return tier; }
+    return 'R';
+  }
+  const TIER_RANK = { R: 0, SR: 1, SSR: 2, LR: 3 };
+  function pull(n) {
+    if (gacha.tickets < GACHA.cost * n || revealing) return;
+    gacha.tickets -= GACHA.cost * n;
+    const results = [];
+    for (let i = 0; i < n; i++) {
+      const tier = rollTier(), pool = gachaPool(tier), id = pool[(Math.random() * pool.length) | 0];
+      const dupe = gacha.owned.includes(id);
+      if (!dupe) gacha.owned.push(id);
+      results.push({ id, tier, dupe });
+    }
+    saveGacha(); updateTicketBadge();
+    playReveal(results);
+  }
+
+  // The reveal: a capsule drops and cracks open. SR adds gold, SSR goes rainbow and cuts to manga panels.
+  // A x10 plays once, keyed to its best pull, then lays all ten out.
+  let revealing = false, revealTimers = [], revealDone = null;
+  function playReveal(results) {
+    const R = $('reveal');
+    const best = results.reduce((a, r) => TIER_RANK[r.tier] > TIER_RANK[a.tier] ? r : a, results[0]);
+    const tier = best.tier, C = CHARS[best.id];
+    revealing = true; revealTimers.forEach(clearTimeout); revealTimers = [];
+    R.className = 'tier-' + tier + (results.length > 1 ? ' multi' : ''); R.hidden = false;
+    R.style.setProperty('--c', GACHA.tiers[tier].color);
+    $('rv-tier').textContent = tier;
+    $('rv-komas').innerHTML = '';
+    if (results.length === 1) {
+      $('rv-art').innerHTML = portrait(C.forms[C.forms.length - 1].sprite) + portrait(C.forms[0].sprite);
+      $('rv-rarity').textContent = tier;
+      $('rv-name').textContent = C.name;
+      $('rv-note').textContent = best.dupe ? 'Already in your roster' : 'New fighter unlocked: ' + C.title;
+    } else {
+      $('rv-multi').innerHTML = `<div class="rv-multi-title">Summon \u00d7${results.length}</div><div class="rv-grid">` + results.map((r, i) => {
+        const c = CHARS[r.id];
+        return `<div class="rv-tile t-${r.tier}" style="--c:${GACHA.tiers[r.tier].color};--d:${i * 0.09}s"><span class="rar">${r.tier}</span>${portrait(c.forms[0].sprite)}<span class="rv-tile-name">${esc(c.name)}</span><span class="rv-tile-note">${r.dupe ? 'Duplicate' : 'NEW'}</span></div>`;
+      }).join('') + '</div>';
+    }
+    const at = (ms, fn) => revealTimers.push(setTimeout(fn, ms));
+    const phase = p => { R.dataset.phase = p; };
+    phase('drop'); sfx('pick');
+    let t = 1100;
+    at(t, () => { phase('crack'); sfx(tier === 'R' ? 'level' : 'transform'); });
+    t += tier === 'R' ? 500 : 900;
+    if (tier === 'LR') {   // Legendary Rare: the Dragon Ball intro manga, panel by panel, then the logo
+      $('rv-lr').innerHTML = '';
+      at(t, () => { phase('lr'); sfx('boss'); });
+      t += 300;
+      for (let i = 0; i < LR_PANELS; i++) {
+        const last = i === LR_PANELS - 1;
+        at(t, () => {
+          const img = document.createElement('img');
+          img.src = 'art/lr/p' + i + '.webp'; img.alt = ''; img.className = 'lrp' + (last ? ' logo' : '') + ' s' + (i % 4);
+          $('rv-lr').appendChild(img); sfx(last ? 'transform' : 'hit'); if (!last) sfx('boom');
+        });
+        t += last ? 1600 : 620;
+      }
+      at(t, () => { phase('ssr'); sfx('boss'); });
+      t += 1400;
+    }
+    if (tier === 'SSR') {
+      at(t, () => { phase('ssr'); sfx('boss'); });
+      t += 1300;
+      const komas = C.komas || [];
+      komas.forEach((k, i) => at(t + i * 650, () => {
+        phase('komas');
+        const img = document.createElement('img');
+        img.src = 'art/komas/k' + k + '.png'; img.alt = ''; img.className = 'koma k' + i;
+        $('rv-komas').appendChild(img); sfx('hit'); sfx('boom');
+      }));
+      t += komas.length * 650 + 900;
+    }
+    at(t, () => { phase('card'); sfx('level'); revealDone = true; });
+    revealDone = false;
+  }
+  function revealClick() {
+    if (!revealing) return;
+    if (!revealDone) { revealTimers.forEach(clearTimeout); revealTimers = []; $('reveal').dataset.phase = 'card'; revealDone = true; return; }
+    revealing = false; $('reveal').hidden = true; openGacha();
+  }
+  $('reveal').addEventListener('click', revealClick);
+  $('g-pull').onclick = () => pull(1);
+  $('g-pull10').onclick = () => pull(GACHA.multi);
+  $('g-close').onclick = closeGacha;
+  $('g-refill').hidden = !SUMMON_SIM;
+  $('g-sim').hidden = !SUMMON_SIM;
+  $('g-refill').textContent = 'Refill ' + SIM_TICKETS + ' tickets';
+  $('g-sim').textContent = 'Summon simulator: ' + SIM_TICKETS + ' practice tickets. Nothing you spend or unlock here is saved.';
+  $('g-refill').onclick = () => { gacha.tickets = SIM_TICKETS; gacha.owned = []; openGacha(); toast('Simulator reset: ' + SIM_TICKETS + ' tickets, empty roster'); };
+  $('summon-btn').onclick = () => { audioInit(); openGacha(); };
+
   function onKey(e) {
     const c = e.code;
     if (c === 'KeyM') { muted = !muted; toast(muted ? 'Sound off' : 'Sound on'); return; }
     const digit = /^(Digit|Numpad)([1-9])$/.exec(c);
     if (!$('lobby').hidden) return;
+    if ((state === 'intro' || state === 'transform') && c !== 'KeyM' && skipCinematic()) return;
     if (isClient()) { clientKey(c, digit); return; }
-    if (state === 'title' && digit && +digit[2] <= 4) { pickFighter(Object.keys(CHARS)[+digit[2] - 1]); return; }
+    if (!$('gacha').hidden || !$('reveal').hidden) { if (!$('reveal').hidden && (c === 'Space' || c === 'Enter')) revealClick(); else if (c === 'Escape' && !$('gacha').hidden && $('reveal').hidden) closeGacha(); return; }
+    const roster = Object.keys(CHARS).filter(ownsChar);
+    if (state === 'title' && digit && roster[+digit[2] - 1]) { pickFighter(roster[+digit[2] - 1]); return; }
     if (state === 'levelup' && digit && +digit[2] <= 3) { choose(+digit[2] - 1); return; }
     if (state === 'bond') { bondKey(c, digit); return; }
     if (state === 'wish') { if (digit) chooseWish(+digit[2] - 1); return; }
     if (c === 'Escape' || c === 'KeyP') { if (state === 'play') pause(); else if (state === 'paused') resume(); return; }
     if (state === 'play' && G && isHost()) {   // online host: this keyboard only drives P1
       if (FUSE_KEYS.flat().includes(c)) fusePressed(G.players[0]);
+      if (c === 'KeyQ') castUltimate(G.players[0]);
       if (digit) selectSlot(G.players[0], +digit[2] - 1);
       if (c === 'KeyB') openBond(G.players[0]);
       return;
@@ -2125,6 +2682,9 @@
       else if (FUSE_KEYS[0].includes(c) && G.players[0]) fusePressed(G.players[0]);
       else if (FUSE_KEYS[1].includes(c) && G.players[1]) fusePressed(G.players[1]);
       else if (FUSE_KEYS[2].includes(c) && G.players[2]) fusePressed(G.players[2]);
+      if (c === 'KeyQ') castUltimate(G.players[0]);
+      if ((c === 'NumpadDecimal' || c === 'Period') && G.players[1] && !G.test) castUltimate(G.players[1]);
+      if (c === 'KeyN' && G.players[2]) castUltimate(G.players[2]);
       const p3 = G.players[2];
       if (p3 && (c === 'KeyU' || c === 'KeyO')) selectSlot(p3, (p3.active + (c === 'KeyO' ? 1 : -1) + p3.slots.length) % p3.slots.length);
       if (p3 && c === 'KeyH') openBond(p3);
@@ -2153,9 +2713,9 @@
   const ROOM_PREFIX = 'zsurvivors-room-';
   function roomCode() { const A = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; let s = ''; for (let i = 0; i < 5; i++) s += A[(Math.random() * A.length) | 0]; return s; }
   function netEvent(ev) { if (isHost()) NET.events.push(ev); }
-  function sendTo(idx, msg) { const s = NET.seats[idx]; if (s && s.conn && s.conn.open) s.conn.send(msg); }
+  function sendTo(idx, msg) { const s = NET.seats[idx]; if (s && s.conn && s.conn.open) s.conn.send(typeof msg === 'string' ? msg : JSON.stringify(msg)); }
   function sendAll(msg) { for (let i = 1; i < NET.seats.length; i++) sendTo(i, msg); }
-  function sendHost(msg) { if (NET.conn && NET.conn.open) NET.conn.send(msg); }
+  function sendHost(msg) { if (NET.conn && NET.conn.open) NET.conn.send(JSON.stringify(msg)); }
   function lobbyStatus(t) { $('lobby-status').textContent = t; }
   function netAvailable() {
     if (window.Peer) return true;
@@ -2176,7 +2736,7 @@
     peer.on('open', () => { lobbyStatus('Share the code with up to three friends. Everyone picks a fighter, then press Start.'); renderLobby(); });
     peer.on('connection', conn => {
       conn.on('open', () => {
-        if (NET.started || NET.seats.length >= 4) { conn.send({ t: 'full', why: NET.started ? 'That game has already started.' : 'That room is full.' }); setTimeout(() => conn.close(), 300); return; }
+        if (NET.started || NET.seats.length >= 4) { conn.send(JSON.stringify({ t: 'full', why: NET.started ? 'That game has already started.' : 'That room is full.' })); setTimeout(() => conn.close(), 300); return; }
         NET.seats.push({ pick: null, conn });
         conn.on('data', msg => hostMsg(NET.seats.findIndex(s => s.conn === conn), msg));
         conn.on('close', () => seatLeft(conn));
@@ -2200,7 +2760,7 @@
     const peer = new Peer(undefined, { debug: 0 });
     NET.peer = peer;
     peer.on('open', () => {
-      const conn = peer.connect(ROOM_PREFIX + code.toLowerCase(), { serialization: 'json', reliable: true });
+      const conn = peer.connect(ROOM_PREFIX + code.toLowerCase(), { serialization: 'raw', reliable: true });
       NET.conn = conn;
       conn.on('open', () => lobbyStatus('Connected. Pick your fighter; the host starts the game.'));
       conn.on('data', clientMsg);
@@ -2235,7 +2795,7 @@
     $('lobby-seats').innerHTML = seats.map((s, i) => `<li style="--c:${P_COLORS[i]}"><span></span><b class="seat">P${i + 1}</b> ${s.pick ? esc(CHARS[s.pick].name) : '<i>choosing...</i>'}${i === 0 ? ' · host' : ''}${i === me ? ' · you' : ''}</li>`).join('') +
       Array.from({ length: 4 - seats.length }, (_, k) => `<li class="open"><span></span><b class="seat">P${seats.length + k + 1}</b> open seat</li>`).join('');
     const mine = seats[me] && seats[me].pick;
-    $('lobby-picks').innerHTML = Object.entries(CHARS).map(([id, C]) =>
+    $('lobby-picks').innerHTML = Object.entries(CHARS).filter(([id]) => ownsChar(id)).map(([id, C]) =>
       `<button class="lpick ${mine === id ? 'on' : ''}" data-id="${id}">${portrait(C.forms[0].sprite)}<span>${C.name}</span></button>`).join('');
     const start = $('lobby-start');
     start.hidden = NET.role !== 'host';
@@ -2266,6 +2826,7 @@
   // ---- host side
   function hostMsg(i, m) {
     if (i < 1) return;
+    if (typeof m === 'string') { try { m = JSON.parse(m); } catch (e) { return; } }
     NET.seats[i].seen = performance.now();
     if (m.t === 'pick' && !NET.started && CHARS[m.id]) { NET.seats[i].pick = m.id; broadcastLobby(); return; }
     if (!isHost() || !G) return;
@@ -2273,16 +2834,19 @@
     if (m.t === 'in') NET.inputs[i] = { x: clamp(+m.x || 0, -1, 1), y: clamp(+m.y || 0, -1, 1) };
     else if (m.t === 'slot') selectSlot(p, m.i | 0, true);
     else if (m.t === 'fuse') fusePressed(p);
+    else if (m.t === 'ult') castUltimate(p);
     else if (m.t === 'bond' && Array.isArray(m.sel)) mergeSlots(p, m.sel.map(x => x | 0));
     else if (m.t === 'choose' && state === 'levelup' && pickPlayer === p) choose(m.i | 0, true);
     else if (m.t === 'wish' && state === 'wish' && G.players[G.wishOrder[G.wishIdx]] === p) chooseWish(m.i | 0, true);
     else if (m.t === 'pause' && state === 'play') { pause(); toast(pName(p) + ' paused the game'); }
     else if (m.t === 'resume') resume();
   }
-  function snapshot() {
+  function snapshot(seat, events) {
     const names = [], nameIx = new Map();
     const nx = s => { let k = nameIx.get(s); if (k === undefined) { k = names.length; names.push(s); nameIx.set(s, k); } return k; };
-    const r = v => Math.round(v * 10) / 10, cx = G.cx, cy = G.cy;
+    const me = G.players[seat], body = me && me.absorbed && G.fusion ? G.fusion.ctrl : me;
+    const view = body ? body.idx : -1, mine = o => o.own === undefined || o.own === view;
+    const r = v => Math.round(v * 10) / 10, cx = body ? body.x : G.cx, cy = body ? body.y : G.cy;
     const near = (o, R) => Math.abs(o.x - cx) < R && Math.abs(o.y - cy) < R;
     for (const e of G.enemies) if (!e.id) e.id = ++NET.eid;
     const boss = G.arena ? (G.arena.phase === 'fight' ? G.arena.boss : null) : G.boss;
@@ -2290,7 +2854,7 @@
       t: 's', st: state, gt: r(G.t), lv: G.level, xp: r(G.xp), xn: G.xpNext, sg: G.sagaIdx, k: G.kills, db: G.dragonBalls, ds: Math.round(G.dmgDealt),
       cx: r(cx), cy: r(cy), sh: r(G.shake), fl: r(G.flash), fc: G.flashCol, wt: r(G.wishT || 0), wf: r(G.wishFade || 0), fcd: r(G.fuseCD),
       req: G.fuseReq ? [G.fuseReq.by, r(G.fuseReq.t)] : null, test: !!G.test,
-      fus: G.fusion ? [G.fusion.kind, G.fusion.ctrl.idx, G.fusion.other.idx, r(G.fusion.t), G.fusion.form, G.fusion.maxForm] : null,
+      fus: G.fusion ? [G.fusion.kind, G.fusion.ctrl.idx, G.fusion.other.idx, r(G.fusion.t), G.fusion.form, G.fusion.maxForm, G.fusion.aim ? [r(G.fusion.aim[0]), r(G.fusion.aim[1])] : 0] : null,
       wait: netWaitText(),
       boss: boss && !boss.dead ? [boss.id, boss.name, boss.color, Math.round(boss.hp), Math.round(boss.maxHp)] : null,
       rift: G.rift ? [r(G.rift.x), r(G.rift.y), r(G.rift.t), r(G.rift.ph)] : null,
@@ -2298,20 +2862,20 @@
       pl: G.players.map(p => [p.idx, p.charId, r(p.x), r(p.y), Math.round(p.hp), p.form, (p.down ? 1 : 0) | (p.absorbed ? 2 : 0) | (p.moving ? 4 : 0), p.face, r(p.iframe), r(p.hurtT),
         { maxHp: Math.round(p.ps.maxHp), might: r(p.ps.might * 100) / 100, area: p.ps.area, speed: r(p.ps.speed), dodge: p.ps.dodge, armor: p.ps.armor, cd: p.ps.cd, magnet: p.ps.magnet, xp: p.ps.xp },
         [r(p.buffs.speed), r(p.buffs.dex), r(p.buffs.power)], p.item, r(p.itemCD), p.slots, p.active, p.bonds,
-        Object.fromEntries(Object.entries(p.techs).map(([id, v]) => [id, v.lv])), r(p.reviveT), p.wish]),
+        Object.fromEntries(Object.entries(p.techs).map(([id, v]) => [id, v.lv])), r(p.reviveT), p.wish, Math.round(p.energy || 0)]),
       en: G.enemies.filter(e => !e.dead && (e.boss || near(e, 520))).map(e => [e.id, Math.round(e.x), Math.round(e.y), nx(e.s), e.scale || 1, e.flash > 0 ? 1 : 0, e.boss ? 1 : 0,
         e.color || '', r(e.ph), e.face || 1, e.act ? [e.act.type, r(e.act.t), r(e.act.ang || 0), e.act.moved ? 1 : 0, e.act.hit ? 1 : 0] : 0]),
       nm: names,
       ob: G.orbs.filter(o => near(o, 460)).flatMap(o => [Math.round(o.x), Math.round(o.y), r(o.v)]),
-      pk: G.pickups.map(k => [Math.round(k.x), Math.round(k.y), k.kind, k.cap || '', r(k.t)]),
-      sh2: G.shots.filter(s => near(s, 500)).map(s => [Math.round(s.x), Math.round(s.y), Math.round(s.vx), Math.round(s.vy), r(s.r), s.col, s.core, s.style || '', s.trail ? s.trail.filter((_, i) => i % 2 === 0).map(q => [Math.round(q[0]), Math.round(q[1])]) : 0]),
-      bm: G.beams.map(b => [b.src.idx, r(b.ang * 100) / 100, Math.round(b.len), r(b.width), r(b.life), r(b.max), r(b.grow), b.col, b.core, b.style || '', b.spiral || '']),
-      bb: G.bombs.map(b => [Math.round(b.x), Math.round(b.y), r(b.size * (b.chargeMax > 0 ? clamp(1 - b.charge / b.chargeMax, 0.15, 1) : 1)), b.col, b.core]),
-      hz: G.hz.map(h => [Math.round(h.x), Math.round(h.y), h.col, h.core]),
+      pk: G.pickups.map(k => [Math.round(k.x), Math.round(k.y), k.kind, k.cap || '', r(k.t), r(k.prog || 0)]),
+      sh2: G.shots.filter(s => mine(s) && near(s, 500)).map(s => [Math.round(s.x), Math.round(s.y), Math.round(s.vx), Math.round(s.vy), r(s.r), s.col, s.core, s.style || '', s.trail ? s.trail.filter((_, i) => i % 2 === 0).map(q => [Math.round(q[0]), Math.round(q[1])]) : 0]),
+      bm: G.beams.filter(mine).map(b => [b.src.idx, r(b.ang * 100) / 100, Math.round(b.len), r(b.width), r(b.life), r(b.max), r(b.grow), b.col, b.core, b.style || '', b.spiral || '']),
+      bb: G.bombs.filter(mine).map(b => [Math.round(b.x), Math.round(b.y), r(b.size * (b.chargeMax > 0 ? clamp(1 - b.charge / b.chargeMax, 0.15, 1) : 1)), b.col, b.core]),
+      hz: G.hz.filter(mine).map(h => [Math.round(h.x), Math.round(h.y), h.col, h.core, h.ghost ? 1 : 0]),
       es: G.eshots.filter(s => near(s, 500)).map(s => [Math.round(s.x), Math.round(s.y), Math.round(s.vx), Math.round(s.vy), s.r, s.col, s.big ? 1 : 0]),
-      fx: G.fx.map(f => [f.type, Math.round(f.x), Math.round(f.y), Math.round(f.r || 0), r(f.life), r(f.max), f.col || '', f.core || '', Math.round(f.x2 || 0), Math.round(f.y2 || 0)]),
-      tx: G.texts.slice(-45).map(t => [Math.round(t.x), Math.round(t.y), t.s, t.col, r(t.life), t.max, t.big ? 1 : 0]),
-      ev: NET.events.splice(0),
+      fx: G.fx.filter(f => mine(f) && near(f, 520)).map(f => [f.type, Math.round(f.x), Math.round(f.y), Math.round(f.r || 0), r(f.life), r(f.max), f.col || '', f.core || '', Math.round(f.x2 || 0), Math.round(f.y2 || 0)]),
+      tx: G.texts.filter(t => mine(t) && near(t, 420)).slice(-45).map(t => [Math.round(t.x), Math.round(t.y), t.s, t.col, r(t.life), t.max, t.big ? 1 : 0]),
+      ev: events,
     };
   }
   function netWaitText() {
@@ -2324,15 +2888,28 @@
   function hostNetTick() {
     if (!isHost() || !G) return;
     const now = performance.now();
-    for (let i = 1; i < NET.seats.length; i++) {   // heartbeat: guests send input constantly, so silence means they left
+    // Heartbeat. Guests answer every snapshot, but a background tab can still go quiet for a while,
+    // so a silent guest only stops moving; they're dropped once the link has closed or after a long silence.
+    for (let i = 1; i < NET.seats.length; i++) {
       const s = NET.seats[i];
-      if (!s.gone && now - (s.seen || now) > 6000) { seatLeft(s.conn); try { s.conn.close(); } catch (e) { } }
       if (!s.seen) s.seen = now;
+      const quiet = now - s.seen;
+      if (s.gone) continue;
+      if (quiet > 1500) NET.inputs[i] = { x: 0, y: 0 };
+      if (quiet > 45000 || (s.conn && !s.conn.open && quiet > 5000)) { seatLeft(s.conn); try { s.conn.close(); } catch (e) { } }
     }
     if (now - NET.lastSnap < 66) return;
     NET.lastSnap = now;
-    const snap = JSON.stringify(snapshot());
-    for (let i = 1; i < NET.seats.length; i++) { const s = NET.seats[i]; if (s.conn && s.conn.open && !s.gone) s.conn.send(snap); }
+    const events = NET.events.splice(0);
+    for (let i = 1; i < NET.seats.length; i++) {
+      const s = NET.seats[i];
+      if (!s.conn || !s.conn.open || s.gone) continue;
+      s.ev = (s.ev || []).concat(events).slice(-200);   // events wait for the next snapshot this guest actually gets
+      const dc = s.conn.dataChannel;
+      if (dc && dc.bufferedAmount > 256 * 1024) continue;   // this guest's link is backed up: skip a frame rather than pile up stale ones
+      s.conn.send(JSON.stringify(snapshot(i, s.ev)));
+      s.ev = [];
+    }
     const w = netWaitText(), local = (state === 'levelup' && pickPlayer && !pickPlayer.remote) || (state === 'wish' && !G.players[G.wishOrder[G.wishIdx]].remote) || state === 'paused' || (state === 'bond' && bondP && !bondP.remote);
     showWait(local ? '' : w);
   }
@@ -2346,13 +2923,13 @@
     if (m.t === 'full') { lobbyStatus(m.why); return; }
     if (m.t === 'closed') { leaveRoom(true); toTitle(); toast('The host closed the room'); return; }
     if (m.t === 'start') { NET.me = m.you; NET.started = true; $('lobby').hidden = true; $('title').hidden = true; G = null; return; }
-    if (m.t === 's') { applySnapshot(m); return; }
+    if (m.t === 's') { applySnapshot(m); if (performance.now() - (NET.lastIn || 0) > 250) sendInput(); return; }
     if (m.t === 'lvl') { showRemoteCards(m); return; }
     if (m.t === 'wishes') { showRemoteWishes(m); return; }
     if (m.t === 'over') { showRemoteOver(m); return; }
   }
   function makeClientG() {
-    return { client: true, t: 0, sagaIdx: 0, sagaT: 0, enemies: [], shots: [], eshots: [], beams: [], bombs: [], hz: [], fx: [], parts: [], texts: [], orbs: [], pickups: [],
+    return { client: true, t: 0, sagaIdx: 0, sagaT: 0, ults: [], enemies: [], shots: [], eshots: [], beams: [], bombs: [], hz: [], fx: [], parts: [], texts: [], orbs: [], pickups: [],
       players: [], level: 1, xp: 0, xpNext: 10, kills: 0, dragonBalls: 0, dmgDealt: 0, shake: 0, flash: 0, flashCol: '#fff', cx: 0, cy: 0, fusion: null, fuseReq: null, fuseCD: 0,
       boss: null, arena: null, rift: null, capsTaken: new Set(), capsSpawned: new Set(), picks: [], charIds: [], enemyMap: new Map(), wishT: 0, wishFade: 0 };
   }
@@ -2369,12 +2946,12 @@
     G.fuseReq = S.req ? { by: S.req[0], t: S.req[1] } : null;
     // players
     S.pl.forEach(a => {
-      const [idx, cid, x, y, hp, form, flags, face, iframe, hurtT, ps, buffs, item, itemCD, slots, active, bonds, techs, reviveT, wish] = a;
+      const [idx, cid, x, y, hp, form, flags, face, iframe, hurtT, ps, buffs, item, itemCD, slots, active, bonds, techs, reviveT, wish, energy] = a;
       let p = G.players[idx];
       if (!p || p.charId !== cid) { p = G.players[idx] = makePlayer(idx, cid, x); p.y = y; p.tx = x; p.ty = y; }
       p.tx = x; p.ty = y;
       if (Math.hypot(p.x - x, p.y - y) > 140) { p.x = x; p.y = y; }   // teleports (rifts, fusion) snap
-      Object.assign(p, { hp, form, down: !!(flags & 1), absorbed: !!(flags & 2), moving: !!(flags & 4), face, iframe, hurtT, ps, item, itemCD, slots, active, bonds, reviveT, wish });
+      Object.assign(p, { hp, form, down: !!(flags & 1), absorbed: !!(flags & 2), moving: !!(flags & 4), face, iframe, hurtT, ps, item, itemCD, slots, active, bonds, reviveT, wish, energy: energy || 0 });
       p.buffs = { speed: buffs[0], dex: buffs[1], power: buffs[2] };
       const old = p.techs; p.techs = {};
       for (const id in techs) p.techs[id] = { lv: techs[id], ang: old[id] ? old[id].ang : 0, ct: [] };
@@ -2383,8 +2960,8 @@
     if (fresh) buildPlayerCards();
     for (const p of G.players) p.fusion = null;
     if (S.fus) {
-      const [kind, c, o, t, form, maxForm] = S.fus;
-      G.fusion = { kind, ctrl: G.players[c], other: G.players[o], t, form, maxForm };
+      const [kind, c, o, t, form, maxForm, aim] = S.fus;
+      G.fusion = { kind, ctrl: G.players[c], other: G.players[o], t, form, maxForm, aim: aim || null };
       G.players[c].fusion = G.fusion;
     } else G.fusion = null;
     // enemies keep identity between snapshots so they can glide
@@ -2405,11 +2982,11 @@
     G.arena = S.ar ? { cx: S.ar[0], cy: S.ar[1], R: S.ar[2], t: S.ar[3], phase: S.ar[4], exit: S.ar[5] ? { x: S.ar[5][0], y: S.ar[5][1] } : null, def: { color: S.ar[6], name: S.ar[7] }, boss: G.boss } : null;
     if (G.arena) G.boss = null;
     G.orbs = []; for (let i = 0; i < S.ob.length; i += 3) G.orbs.push({ x: S.ob[i], y: S.ob[i + 1], v: S.ob[i + 2] });
-    G.pickups = S.pk.map(a => ({ x: a[0], y: a[1], kind: a[2], cap: a[3] || undefined, t: a[4] }));
+    G.pickups = S.pk.map(a => ({ x: a[0], y: a[1], kind: a[2], cap: a[3] || undefined, t: a[4], prog: a[5] || 0 }));
     G.shots = S.sh2.map(a => ({ x: a[0], y: a[1], vx: a[2], vy: a[3], r: a[4], col: a[5], core: a[6], style: a[7] || undefined, trail: a[8] || undefined }));
     G.beams = S.bm.map(a => ({ src: G.players[a[0]], ang: a[1], len: a[2], width: a[3], life: a[4], max: a[5], grow: a[6], col: a[7], core: a[8], style: a[9] || undefined, spiral: a[10] || undefined }));
     G.bombs = S.bb.map(a => ({ x: a[0], y: a[1], size: a[2], charge: 0, chargeMax: 0, col: a[3], core: a[4] }));
-    G.hz = S.hz.map(a => ({ x: a[0], y: a[1], col: a[2], core: a[3] }));
+    G.hz = S.hz.map(a => ({ x: a[0], y: a[1], col: a[2], core: a[3], ghost: !!a[4] }));
     G.eshots = S.es.map(a => ({ x: a[0], y: a[1], vx: a[2], vy: a[3], r: a[4], col: a[5], big: !!a[6] }));
     G.fx = S.fx.map(a => ({ type: a[0], x: a[1], y: a[2], r: a[3], life: a[4], max: a[5], col: a[6], core: a[7] || undefined, x2: a[8], y2: a[9] }));
     G.texts = S.tx.map(a => ({ x: a[0], y: a[1], s: a[2], col: a[3], life: a[4], max: a[5], big: !!a[6] }));
@@ -2418,27 +2995,34 @@
       else if (ev[0] === 't') toast(ev[1]);
       else if (ev[0] === 's') sfx(ev[1]);
       else if (ev[0] === 'p') burst(ev[1], ev[2], ev[3], ev[4], ev[5], ev[6]);
+      else if (ev[0] === 'tk') addTickets(ev[1]);
+      else if (ev[0] === 'bi') showIntro(ev[1]);
+      else if (ev[0] === 'ci') showCutin(ev[1]);
+      else if (ev[0] === 'clip') { preloadClip(); playClip(); }
+      else if (ev[0] === 'clipx') hideClip();
     }
     // overlays that belong to the host's state
     if (state !== 'levelup') $('levelup').hidden = true;
     if (state !== 'wish') $('wish').hidden = true;
     if (state !== 'over') $('over').hidden = true;
+    if (state !== 'intro') hideIntro();
+    if (state !== 'transform') hideClip();
     const myTurn = (state === 'levelup' && !$('levelup').hidden) || (state === 'wish' && !$('wish').hidden);
     showWait(myTurn ? '' : S.wait);
   }
   function myBody() { const me = G && G.players[NET.me]; if (!me) return null; return me.absorbed && G.fusion ? G.fusion.ctrl : me; }
   function clientTick(dt) {
-    if (NET.started && performance.now() - (NET.lastRecv || performance.now()) > 8000) { leaveRoom(true); toTitle(); toast('Lost the connection to the host'); return; }
+    if (NET.started && performance.now() - (NET.lastRecv || performance.now()) > 30000) { leaveRoom(true); toTitle(); toast('Lost the connection to the host'); return; }
     if (!G || !G.client) return;
     G.t += dt; if (state === 'wish') G.wishT += dt;
     const me = G.players[NET.me], body = myBody();
     const [ix, iy] = localInput(body || me);
     for (const p of G.players) {
       if (p === body && state === 'play' && !p.down) {   // predict our own movement, then ease toward the host's answer
-        const sp = moveSpeed(p);
+        const sp = me.fusion ? 0 : moveSpeed(p);   // a fusion's shooter aims; the partner does the walking
         p.x += ix * sp * dt; p.y += iy * sp * dt;
         p.x += (p.tx - p.x) * Math.min(1, dt * 4); p.y += (p.ty - p.y) * Math.min(1, dt * 4);
-        if (ix) p.face = ix > 0 ? 1 : -1;
+        if (ix && sp) p.face = ix > 0 ? 1 : -1;
       } else { p.x += (p.tx - p.x) * Math.min(1, dt * 12); p.y += (p.ty - p.y) * Math.min(1, dt * 12); }
       p.anim += dt; p.hurtT -= dt; p.iframe -= dt;
       for (const id in p.techs) p.techs[id].ang += dt * 1.6;
@@ -2450,9 +3034,14 @@
     if (G.fuseReq) G.fuseReq.t -= dt;
     updateFx(dt);
     if (body) { G.cx = body.x; G.cy = body.y; }
-    // send input ~20 times a second
+    // send input ~20 times a second (and in reply to each snapshot, which keeps a background tab alive)
+    NET.ix = ix; NET.iy = iy;
     NET.inT -= dt;
-    if (NET.inT <= 0) { NET.inT = 0.05; sendHost({ t: 'in', x: Math.round(ix * 100) / 100, y: Math.round(iy * 100) / 100 }); }
+    if (NET.inT <= 0) sendInput();
+  }
+  function sendInput() {
+    NET.inT = 0.05; NET.lastIn = performance.now();
+    sendHost({ t: 'in', x: Math.round((NET.ix || 0) * 100) / 100, y: Math.round((NET.iy || 0) * 100) / 100 });
   }
   function showRemoteCards(m) {
     const box = $('cards'); box.innerHTML = '';
@@ -2520,6 +3109,7 @@
     const me = G.players[NET.me];
     if (digit) selectSlot(me, +digit[2] - 1);
     if (c === 'KeyE' || c === 'Space' || c === 'Enter') sendHost({ t: 'fuse' });
+    if (c === 'KeyQ') sendHost({ t: 'ult' });
     if (c === 'KeyB') openBond(me);
   }
 
@@ -2538,6 +3128,7 @@
     if (state === 'play') update(dt);
     else if (state === 'transform') { updateTransform(dt); updateFx(dt); }
     else if (state === 'fusing') { updateFusing(dt); updateFx(dt); }
+    else if (state === 'intro') { G.introT -= dt; updateFx(dt); if (G.introT <= 0) endIntro(); }
     else if (state === 'wish') { G.wishT += dt; updateFx(dt); }
   }
   // rAF drives the loop; a slow timer keeps it ticking if the host stops delivering frames.
@@ -2575,10 +3166,22 @@
   }
 
   // Open the page with #debug to get a console handle for testing.
+  // #ssjtest: a solo Goku run one level short of Super Saiyan; a few kills set off the transformation.
+  function startSsjTest() {
+    audioInit();
+    newRun(['goku']);
+    const p = G.players[0], lv = p.C.forms[1].lv - 1;
+    G.level = lv; G.xpNext = xpFor(lv); G.xp = G.xpNext - 3;
+    for (const [id, l] of p.C.techs) if (l <= lv) { if (!p.techs[id]) addTech(p, id); p.announced.add(id); }
+    recalc(p); p.hp = p.ps.maxHp;
+    hudKey = ''; techKey = '';
+    showBanner('ALMOST SUPER SAIYAN', 'Defeat a few enemies to reach level ' + p.C.forms[1].lv, '#ffd83a');
+  }
   if (location.hash === '#debug' || location.hash === '#fusiontest') window.ZS = {
     get G() { return G; }, get state() { return state; }, get loop() { return { frameCount, last, now: performance.now(), rafPending, VW, VH }; }, xp: v => gainXp(v), saga: n => { G.sagaIdx = n - 1; nextSaga(); }, boss: () => { G.sagaT = SAGA_TIME; },
-    start: ids => newRun(ids), rift: () => { G.riftT = 0; }, arena: () => { if (!G.rift) spawnRift(); if (G.rift) enterArena(); },
+    start: ids => newRun(ids), tickets: n => addTickets(n, true), reveal: (id, tier) => playReveal([{ id, tier, dupe: false }]), gacha: () => gacha, rift: () => { G.riftT = 0; }, arena: () => { if (!G.rift) spawnRift(); if (G.rift) enterArena(); },
     cap: (t, i = 0) => openCapsule({ cap: t }, G.players[i]), fuse: (i) => fusePressed(G.players[i]), endFusion: () => endFusion(false),
+    ult: (i = 0) => castUltimate(G.players[i]), supply: () => spawnSupplyDrop(), snap: (i = 1) => snapshot(i, []),
     step: (n, pick = true) => {
       for (let i = 0; i < n; i++) {
         if (state === 'levelup' && pick) choose(Math.max(0, curOpts.findIndex(o => o.kind === 'tech')));
@@ -2594,6 +3197,8 @@
   Promise.all(artNames().map(loadImg)).then(() => (document.fonts ? document.fonts.ready : null)).then(() => {
     $('loading').hidden = true; toTitle();
     if (location.hash === '#fusiontest') startFusionTest();
+    if (location.hash === '#ssjtest') startSsjTest();
+    if (SUMMON_SIM) openGacha();
   });
   schedule();
 })();

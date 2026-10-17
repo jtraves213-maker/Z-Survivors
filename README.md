@@ -36,15 +36,20 @@ Online, every player uses their own keyboard and mouse:
 | Choose technique slot | 1–9 | Click a slot in the bar | LB / RB |
 | Bond techniques (after a boss) | B | Click the Bond button | Y |
 | Fuse (Goku + Vegeta) | E, Space or Enter | | A |
+| Ultimate (full energy bar) | Q | Right-click | X |
 | Pick a card or wish | 1, 2, 3… | Click it | D-pad + A |
 | Pause | Esc or P | Pause button | Start |
 | Sound on/off | M | | |
 
 Couch co-op on one computer (1–4 players):
-- **P1:** WASD, 1–9, E, B.
-- **P2:** arrows, numpad 1–9, Enter, numpad +.
-- **P3:** IJKL, U/O, Y, H.
+- **P1:** WASD, 1–9, E, B, Q.
+- **P2:** arrows, numpad 1–9, Enter, numpad +, numpad . (ultimate).
+- **P3:** IJKL, U/O, Y, H, N (ultimate).
 - **Extra players:** gamepads take the last seats.
+
+Energy fills as you defeat enemies; when the bar is full, your fighter's signature ultimate is ready. Capsule Corp capsules are scattered around the map (and bosses leave one behind): stand next to one for 3 seconds to open it for capsules, the odd ticket or senzu, and a good chance at a Dragon Ball. A fusion lasts 30 seconds and recharges in 2 minutes. As Gogeta, Goku's player aims and fires while Vegeta's player steers; Vegito is the other way round.
+
+Bosses open with an intro card, and every ultimate flashes a cut-in of the fighter shouting the move. Summons now include an LR (Legendary Rare, 2%) tier, which plays the Dragon Ball intro manga before the card; Gogeta is the first LR.
 
 ## Regenerating art
 
@@ -64,4 +69,24 @@ python tools/make_fighters.py
 
 ```bash
 python tools/make_hd_art.py
+```
+
+`make_eb.py` (Extreme Butoden fighters, bosses, cut-ins and intro art) and `make_npcs.py` (Saturn, GBA, DS and mobile rips, the LR manga panels and the Super Saiyan clip) also need numpy. They copy any missing source sheet from the `DB SurvivorZ` folder next to this project.
+
+```bash
+python tools/make_eb.py
+```
+
+```bash
+python tools/make_npcs.py
+```
+
+```bash
+python tools/make_fx.py
+```
+
+After rebuilding any sprites, re-run the sizing pass so every fighter draws at the same height:
+
+```bash
+python tools/sizes.py
 ```

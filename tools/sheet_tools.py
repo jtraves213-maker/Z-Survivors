@@ -85,3 +85,29 @@ def labelled_preview(im, boxes, path, scale=1, crop_h=None):
     if crop_h:
         pv = pv.crop((0, 0, pv.width, min(pv.height, crop_h * scale)))
     pv.save(path)
+
+
+def flood_strip(im, bg_colors, tol=8):
+    """Clear only the background that is connected to the sheet border (keeps whites inside sprites)."""
+    im = im.convert("RGBA")
+    px = im.load()
+    W, H = im.size
+    bgs = [tuple(c[:3]) for c in bg_colors]
+    def isbg(c):
+        return any(abs(c[0] - b[0]) <= tol and abs(c[1] - b[1]) <= tol and abs(c[2] - b[2]) <= tol for b in bgs)
+    seen = bytearray(W * H)
+    q = deque()
+    for x in range(W):
+        q.append((x, 0)); q.append((x, H - 1))
+    for y in range(H):
+        q.append((0, y)); q.append((W - 1, y))
+    while q:
+        x, y = q.popleft()
+        if x < 0 or y < 0 or x >= W or y >= H or seen[y * W + x]:
+            continue
+        seen[y * W + x] = 1
+        if not isbg(px[x, y]):
+            continue
+        px[x, y] = (0, 0, 0, 0)
+        q.extend(((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)))
+    return im
